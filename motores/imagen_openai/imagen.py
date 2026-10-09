@@ -28,6 +28,7 @@ import requests
 from PIL import Image
 
 API_URL = "https://api.openai.com/v1/images/edits"
+API_URL_GENERAR = "https://api.openai.com/v1/images/generations"
 MODELO = "gpt-image-2"
 
 PRECIO = {"low": 0.006, "medium": 0.041, "high": 0.165}
@@ -599,12 +600,9 @@ def generar(prompt, referencias, *, quality="low", tamano="apaisado",
     # que /v1/images/edits rechaza. El sintoma era un 400 de la API diciendo
     # "Unsupported content type", que suena a fallo del servidor y manda a
     # buscar al sitio equivocado, cuando lo que pasa es que falta una entrada.
-    if not referencias:
-        raise ValueError(
-            "generar() necesita al menos una imagen de referencia: la API de "
-            "edicion de imagenes se llama con adjuntos, y sin ellos la peticion "
-            "sale con el formato equivocado y la rechaza con un error que no "
-            "explica nada. Pon al menos una imagen de estilo.")
+    # PARCHE: sin referencias (laminas de un estilo descrito) se usa
+    # /v1/images/generations con JSON en vez de /v1/images/edits.
+    referencias = list(referencias or [])
     faltan = [r for r in referencias if not os.path.exists(r)]
     if faltan:
         raise ValueError("estas imagenes de referencia no existen: "
@@ -636,9 +634,14 @@ def generar(prompt, referencias, *, quality="low", tamano="apaisado",
             datos = {"model": MODELO, "prompt": prompt,
                      "size": TAMANOS[tamano], "quality": quality, "n": "1"}
             t0 = time.time()
-            r = requests.post(API_URL,
-                              headers={"Authorization": f"Bearer {cuenta.clave}"},
-                              data=datos, files=archivos, timeout=600)
+            if archivos:
+                r = requests.post(API_URL,
+                                  headers={"Authorization": f"Bearer {cuenta.clave}"},
+                                  data=datos, files=archivos, timeout=600)
+            else:
+                r = requests.post(API_URL_GENERAR,
+                                  headers={"Authorization": f"Bearer {cuenta.clave}"},
+                                  json=dict(datos, n=1), timeout=600)
             segundos = time.time() - t0
         finally:
             for fh in abiertos:
