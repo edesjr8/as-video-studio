@@ -1109,6 +1109,7 @@ def probar_render(proyecto, estado, params):
     probar_planificar_no_encoge(proyecto, params)
     probar_rehacer_uno_rehace_uno(proyecto, estado, params)
     probar_plano_que_falla_no_tumba_la_tanda(proyecto, estado)
+    probar_corregir_solo_con_mi_texto(proyecto, estado)
     return resultado
 
 
@@ -1305,6 +1306,51 @@ def probar_plano_que_falla_no_tumba_la_tanda(proyecto, estado):
         except RuntimeError as fallo:
             ok("ningun plano" in str(fallo),
                f"si no sale NINGUN plano, el paso falla como antes ({fallo})")
+    finally:
+        p6_assets._producir_imagen = original
+
+
+def probar_corregir_solo_con_mi_texto(proyecto, estado):
+    """El selector «Corregir con» de la pantalla de Imagenes.
+
+    Con Kie lo que se escribe en la nota es EL prompt entero: el prompt del
+    plano completo pasa del tope de Kie y la tarea se rechaza. Con OpenAI
+    sigue yendo el prompt completo con la nota dentro.
+    """
+    print("\n  [corregir con Kie manda solo el texto de la nota]")
+    plan = p6_assets.plan_actual(proyecto)
+    sid = next(e["id"] for e in plan["escenas"]
+               if not (e.get("sigue_a") or e.get("componente")
+                       or p6_assets.cartelas.sin_imagen(e)))
+    uid = f"escena:{sid}"
+    nota = "ponle un sombrero rojo al personaje"
+    params = dict(estado.params("assets"), corrector="no")
+    params["unidades"] = dict(params.get("unidades") or {},
+                              **{uid: {"feedback": nota}})
+    original = p6_assets._producir_imagen
+    vistas = []
+
+    def mira(nombre, prompt, referencias, destino, p, **kwargs):
+        vistas.append({"prompt": prompt, "refs": list(referencias), **kwargs})
+        return original(nombre, prompt, referencias, destino, p, **kwargs)
+
+    p6_assets._producir_imagen = mira
+    try:
+        p6_assets.ejecutar(proyecto, params, avisador("p6"), unidades=[uid],
+                           rehacer=True, motor_correccion="kie:nano-banana-2")
+        kie = vistas[-1]
+        igual(kie["prompt"], nota, "con Kie el prompt es SOLO el texto de la nota")
+        ok(kie.get("solo_prompt") and kie.get("proveedor") == "kie:nano-banana-2",
+           "y se pide a Kie sin anadirle nada")
+        igual(kie["refs"], [], "sin laminas ni continuidad: solo lo adjuntado")
+
+        p6_assets.ejecutar(proyecto, params, avisador("p6"), unidades=[uid],
+                           rehacer=True, motor_correccion="openai")
+        abierto = vistas[-1]
+        ok(nota in abierto["prompt"] and len(abierto["prompt"]) > len(nota) * 3,
+           "con OpenAI va el prompt completo con la nota dentro")
+        ok(not abierto.get("solo_prompt") and abierto.get("proveedor") == "openai",
+           "y se pide a OpenAI")
     finally:
         p6_assets._producir_imagen = original
 

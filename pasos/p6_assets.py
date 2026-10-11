@@ -2933,7 +2933,7 @@ def _adoptar(nombre, p, firma=None, subcarpetas=("", "escenas", "storyboard", "r
 
 
 def _producir_imagen(nombre, prompt, referencias, destino, p, rehacer=False,
-                     tamano=None):
+                     tamano=None, proveedor=None, solo_prompt=False):
     """Arte adoptado -> cache -> API. Devuelve como se resolvio y el coste.
 
     'rehacer' es el boton de "esta no me gusta": salta el arte adoptado y la
@@ -2980,7 +2980,8 @@ def _producir_imagen(nombre, prompt, referencias, destino, p, rehacer=False,
         corrige = bool(rehacer and os.path.exists(destino))
         envoltorio = getattr(imagen, "contexto", None)
         if envoltorio is not None:
-            with envoltorio(corregir=corrige, actual=destino if corrige else None):
+            with envoltorio(corregir=corrige, actual=destino if corrige else None,
+                            proveedor=proveedor, solo_prompt=solo_prompt):
                 png, meta = imagen.generar(prompt, referencias,
                                            quality=p["calidad"], tamano=tamano)
         else:
@@ -3169,7 +3170,7 @@ def _recolocar_escenas(carpeta, escenas):
 
 def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                      forzar=False, notas_repaso=None, proyecto=None,
-                     fallidos=None):
+                     fallidos=None, motor_correccion=None):
     """Genera los planos y devuelve el coste. En fila o en cadenas paralelas.
 
     `fallidos` recoge {uid: motivo} de los planos que no han salido. Un plano
@@ -3376,12 +3377,22 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                         # sin saldo, cada plano que queda fallaria igual: no
                         # se llama a la API y se deja pendiente
                         raise RuntimeError(estado["sin_saldo"])
+                    # «SOLO MI TEXTO»: el selector de la pantalla de Imagenes
+                    # con Kie. Lo que el humano escribio es EL prompt entero:
+                    # ni el prompt del plano, ni el corrector, ni las laminas.
+                    # Van la imagen actual (para editarla) y lo que el adjunto
+                    # a la nota. Solo al rehacer un plano que ya existe.
+                    solo_texto = bool(
+                        str(motor_correccion or "").startswith("kie")
+                        and nota_texto and pedida and forzar
+                        and os.path.exists(destino))
                     # EL CORRECTOR, solo cuando hay nota y alguien ha pedido rehacer
                     # ESTE plano: es una llamada al CLI por imagen, y una tanda
                     # entera de planos sucios no la merece. Con nota y a mano si:
                     # es la diferencia entre «adjunta lo de siempre» y «mira las
                     # imagenes y adjunta lo que la nota pide» (pasos/corrector.py).
-                    if nota_texto and pedida and _corrector_activo(p):
+                    if (nota_texto and pedida and _corrector_activo(p)
+                            and not solo_texto):
                         corregido = _corregir_con_agente(
                             escena, plan, dirs, p, trabajo, notas_repaso, proyecto,
                             nota_texto, avisar)
@@ -3397,12 +3408,19 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                             + [dict(r, ruta=motor_imagen.normalizar(r["ruta"],
                                                                     dirs["cache"]))
                                for r in corregido["referencias"]])
-                    prompt = _prompt_completo(
-                        escena_final, referencias, p["estilo"],
-                        feedback=nota_texto,
-                        idioma=plan.get("idioma") or "",
-                        formato=plan.get("formato") or "",
-                        fichas_reparto=plan.get("assets"))
+                    if solo_texto:
+                        prompt = nota_texto
+                        referencias = [
+                            r for r in _referencias_de_la_nota(
+                                escena, dirs, p, dirs["cache"], notas_repaso)
+                            if r["papel"] == "adjunta"]
+                    else:
+                        prompt = _prompt_completo(
+                            escena_final, referencias, p["estilo"],
+                            feedback=nota_texto,
+                            idioma=plan.get("idioma") or "",
+                            formato=plan.get("formato") or "",
+                            fichas_reparto=plan.get("assets"))
                     # SI EL HUMANO HA PEDIDO REHACERLA, rehacerla de verdad: ni el
                     # arte adoptado ni la cache valen, porque con el mismo prompt la
                     # cache devuelve exactamente la que acaba de rechazar.
@@ -3428,7 +3446,10 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                                             # plano vertical se PIDE vertical, no
                                             # se recorta de uno apaisado
                                             tamano=p2_brief.comun.ficha_formato(
-                                                plan.get("formato"))["tamano_imagen"])
+                                                plan.get("formato"))["tamano_imagen"],
+                                            # el selector de la pantalla, si lo hay
+                                            proveedor=motor_correccion or None,
+                                            solo_prompt=solo_texto)
                     if corregido:
                         meta = dict(meta, corrector={
                             k: corregido.get(k) for k in
@@ -4242,7 +4263,8 @@ MOTOR_CAMBIOS = {
        "misma imagen, de principio a fin",
 }
 
-OPCIONES_EJECUCION = ("solo_assets", "replantear", "rehacer", "tipos")
+OPCIONES_EJECUCION = ("solo_assets", "replantear", "rehacer", "tipos",
+                      "motor_correccion")
 
 
 def _anotar_tiempo(paso, arranque, hechas, detalle=None, proyecto=None):
@@ -4277,7 +4299,8 @@ def _anotar_tiempo(paso, arranque, hechas, detalle=None, proyecto=None):
 
 
 def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
-             replantear=False, rehacer=False, tipos=None, previo=None):
+             replantear=False, rehacer=False, tipos=None, previo=None,
+             motor_correccion=None):
     """Construye assets y escenas. Si unidades no es None, solo esas.
 
     Con solo_assets se para despues de los assets (sets, reparto, mapas y
@@ -4458,7 +4481,8 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
     coste = _generar_escenas(plan, dirs, p, trabajo, toca, unidades,
                              resultados, avisar, forzar=rehacer,
                              notas_repaso=_notas_del_repaso(proyecto),
-                             proyecto=proyecto, fallidos=fallidos)
+                             proyecto=proyecto, fallidos=fallidos,
+                             motor_correccion=motor_correccion)
     if fallidos:
         # SE PUBLICA LO QUE HA SALIDO. Los planos que fallaron se quedan sin
         # imagen nueva y la version dice cuales son (`planos_fallidos`); la

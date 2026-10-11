@@ -1434,6 +1434,15 @@ def ejecutar_paso(pid: str, paso: str, cuerpo: dict = Body(default=None)):
                                 " (p. ej. [\"reparto\"])")
         if datos["tipos"]:
             opciones["tipos"] = [t.strip() for t in datos["tipos"]]
+    # QUIEN REDIBUJA UNA CORRECCION: el selector de la pantalla de Imagenes.
+    # 'openai' manda el prompt completo de siempre; 'kie:<modelo>' manda SOLO
+    # el texto de la nota (p6_assets, «solo mi texto»).
+    motor = str(datos.get("motor_correccion") or "").strip()
+    if motor:
+        if motor != "openai" and not re.fullmatch(r"kie:[\w./-]+", motor):
+            raise ErrorApi(400, "'motor_correccion' es 'openai' o "
+                                "'kie:<modelo>' (p. ej. kie:nano-banana-2)")
+        opciones["motor_correccion"] = motor
     trabajo_id = lanzar_paso(ctx, paso_id, unidades, opciones=opciones)
     return {"trabajo_id": trabajo_id, "paso": paso_id, "opciones": opciones,
             "unidades": unidades, "estado": "ejecutando",

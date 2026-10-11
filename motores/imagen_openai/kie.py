@@ -16,6 +16,7 @@ Variables de entorno:
   KIE_PRECIO_CREDITO     USD por credito para la cuenta de gasto (def. 0.005)
   KIE_MAX_REFS           tope de referencias por llamada (def. segun modelo)
   KIE_UPLOAD_URL         endpoint de subida (def. el de la doc de Kie)
+  KIE_MAX_PROMPT         tope de caracteres del prompt (def. 5000)
 """
 import hashlib
 import io
@@ -170,6 +171,12 @@ def generar(prompt, referencias, *, modelo="nano-banana-2", quality="low",
     # personajes, continuidad): si sobran, se quitan las ultimas
     referencias = referencias[:maximo] if maximo else []
     resolucion = os.environ.get("KIE_RESOLUCION") or ("2K" if quality == "high" else "1K")
+    # Kie rechaza la tarea entera si el prompt pasa de su tope («exceeds the
+    # maximum length»). El prompt completo del Estudio lo pasa con facilidad:
+    # se recorta por el final, que es donde va lo menos importante.
+    tope = int(os.environ.get("KIE_MAX_PROMPT") or 5000)
+    if len(prompt) > tope:
+        prompt = prompt[:tope]
 
     t0 = time.time()
     urls = [subir(r) for r in referencias]

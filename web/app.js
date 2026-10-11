@@ -7351,6 +7351,7 @@ const PREVIA = {
   t: 0,               // segundo del vídeo, para el subtítulo que toca
   notas: [],          // las del repaso, para pintar las de cada escena
   adjuntos: {},       // escena -> imágenes subidas para la nota a medio escribir
+  motor: '',          // «Corregir con»: 'openai' | 'kie:<modelo>' (motorCorreccion)
   guardando: false,
   borrador: {},       // id de escena -> lo escrito y sin enviar
   editando: '',       // id de la nota que se está corrigiendo, si hay alguna
@@ -7952,6 +7953,24 @@ function cuadroFeedbackEscena(escena) {
     valor => { PREVIA.borrador[escena.id] = valor; },
     'lo que ves y no cuadra con lo que se oye',
     `feedback:${escena.id}`));
+  /* QUIÉN REDIBUJA LA CORRECCIÓN. Con OpenAI va el prompt completo que arma
+     el Estudio (plano, estilo, reparto y la nota). Con Kie va SOLO lo que
+     escribes aquí, más la imagen actual y lo que adjuntes: el prompt
+     completo pasa del tope de Kie y la tarea se rechaza entera. Vale para
+     todas las notas de la pantalla y se recuerda en este navegador. */
+  caja.appendChild(campoSelect(
+    'Corregir con',
+    motorCorreccion(),
+    MOTORES_CORRECCION,
+    valor => {
+      try { localStorage.setItem('estudio.motor_correccion', valor); }
+      catch (e) { /* sin almacén se queda para esta visita */ }
+      PREVIA.motor = valor;
+      repintarVideo();
+    },
+    motorCorreccion() === 'openai'
+      ? 'se envía el prompt completo del Estudio con tu nota dentro'
+      : 'se envía SOLO tu texto, con la imagen actual y lo que adjuntes'));
   /* Una referencia dibuja más que una frase: «el ordenador tiene que ser
      como ESTE». Va con la nota y el corrector la adjunta al generador con la
      etiqueta [adjunta] (p6_assets._adjuntos_de_la_nota), igual que las del
@@ -8605,6 +8624,25 @@ const A_LA_VEZ = 3;
 const COLA_IMG = { espera: [], corriendo: [], fallo: {} };
 
 
+/* LOS MOTORES DEL SELECTOR «Corregir con». El valor viaja tal cual al
+   servidor (`motor_correccion`) y p6_assets decide con él qué prompt manda. */
+const MOTORES_CORRECCION = [
+  { valor: 'openai', nombre: 'OpenAI · prompt completo' },
+  { valor: 'kie:nano-banana-2', nombre: 'Kie · Nano Banana 2 · solo mi texto' },
+];
+
+function motorCorreccion() {
+  if (!PREVIA.motor) {
+    let guardado = '';
+    try { guardado = localStorage.getItem('estudio.motor_correccion') || ''; }
+    catch (e) { /* navegador sin almacén: se usa el de siempre */ }
+    PREVIA.motor = MOTORES_CORRECCION.some(m => m.valor === guardado)
+      ? guardado : 'openai';
+  }
+  return PREVIA.motor;
+}
+
+
 /* EL ✓ LO DICE LA NOTA, Y LO ESCRIBE EL SERVIDOR (`regenerado`: contra qué
    texto se redibujó). Así sobrevive a recargar, y si luego cambias la nota deja
    de coincidir ella sola -- que es lo que se quiere: hay una petición nueva que
@@ -8647,7 +8685,8 @@ function encolarImagen(sid, texto, nid) {
   if (nid && (COLA_IMG.corriendo.some(x => x.nid === nid)
               || COLA_IMG.espera.some(x => x.nid === nid))) return;
   if (nid) delete COLA_IMG.fallo[nid];
-  COLA_IMG.espera.push({ sid, texto: String(texto || ''), nid: nid || '' });
+  COLA_IMG.espera.push({ sid, texto: String(texto || ''), nid: nid || '',
+                         motor: motorCorreccion() });
   repintarVideo();
   soltarCola();
 }
@@ -8732,8 +8771,12 @@ async function soltarCola() {
      en la cola y sale en la tanda siguiente. */
   const tanda = [];
   const puestos = new Set();
+  /* UN MOTOR POR TANDA: el motor va en la llamada, no en cada plano. Las que
+     pidan el otro esperan a la tanda siguiente. */
+  const motor = COLA_IMG.espera[0].motor || 'openai';
   while (tanda.length < A_LA_VEZ) {
-    const i = COLA_IMG.espera.findIndex(x => !puestos.has(x.sid));
+    const i = COLA_IMG.espera.findIndex(
+      x => !puestos.has(x.sid) && (x.motor || 'openai') === motor);
     if (i < 0) break;
     puestos.add(COLA_IMG.espera[i].sid);
     tanda.push(COLA_IMG.espera.splice(i, 1)[0]);
@@ -8760,7 +8803,8 @@ async function soltarCola() {
        prompt la cache devolveria la imagen que acabas de rechazar. */
     const datos = await pedir(API.ejecutar(v.pid, 'assets'), {
       method: 'POST',
-      cuerpo: { unidades: tanda.map(x => `escena:${x.sid}`), rehacer: true },
+      cuerpo: { unidades: tanda.map(x => `escena:${x.sid}`), rehacer: true,
+                motor_correccion: motor },
     });
     const tid = datos.trabajo_id || (datos.trabajo || {}).id;
     if (!tid) throw new Error('el servidor no ha devuelto ningún trabajo');

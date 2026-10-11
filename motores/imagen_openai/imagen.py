@@ -846,14 +846,23 @@ _CONTEXTO = threading.local()
 
 class contexto:
     """Lo pone _producir_imagen al rehacer un plano que el humano rechazo:
-    marca la llamada como CORRECCION y dice cual es la imagen actual."""
+    marca la llamada como CORRECCION y dice cual es la imagen actual.
 
-    def __init__(self, corregir=False, actual=None):
+    `proveedor` fuerza quien dibuja ESTA llamada ('openai' | 'kie:<modelo>'),
+    por encima de IMAGEN_GENERAR / IMAGEN_CORREGIR: es el selector de la
+    pantalla de Imagenes. `solo_prompt` manda el prompt TAL CUAL, sin anadirle
+    el aviso de correccion: es el modo «solo mi texto» de Kie."""
+
+    def __init__(self, corregir=False, actual=None, proveedor=None,
+                 solo_prompt=False):
         self.corregir, self.actual = corregir, actual
+        self.proveedor, self.solo_prompt = proveedor, solo_prompt
 
     def __enter__(self):
         self._previo = getattr(_CONTEXTO, "valor", None)
-        _CONTEXTO.valor = {"corregir": self.corregir, "actual": self.actual}
+        _CONTEXTO.valor = {"corregir": self.corregir, "actual": self.actual,
+                           "proveedor": self.proveedor,
+                           "solo_prompt": self.solo_prompt}
         return self
 
     def __exit__(self, *exc):
@@ -889,29 +898,32 @@ AVISO_CORRECCION = (
     "colores) y cambia SOLO lo que pide la indicacion.")
 
 
-def _con_la_actual(prompt, refs, actual, maximo):
+def _con_la_actual(prompt, refs, actual, maximo, solo_prompt=False):
     """Una CORRECCION lleva la imagen actual como ULTIMA referencia.
 
     Al final para no mover la numeracion de las referencias que cita el
-    prompt; y si no caben todas, se recortan las otras, nunca la actual.
+    prompt; y si no caben todas, se recortan las otras, nunca la actual. Con
+    `solo_prompt` el texto va tal cual lo escribio el humano.
     """
     refs = [r for r in refs if r != actual]
     refs = refs[:max(maximo - 1, 0)] + [actual]
-    return prompt + AVISO_CORRECCION, refs
+    return (prompt if solo_prompt else prompt + AVISO_CORRECCION), refs
 
 
 def generar(prompt, referencias, *, quality="low", tamano="apaisado",
             api_key=None, reintentos=6):
     ctx = getattr(_CONTEXTO, "valor", None) or {}
     corregir = bool(ctx.get("corregir"))
-    elegido = _proveedor(corregir)
+    elegido = (ctx.get("proveedor") or "").strip() or _proveedor(corregir)
+    solo_prompt = bool(ctx.get("solo_prompt"))
     refs = list(referencias or [])
     actual = ctx.get("actual") if corregir else None
     if actual and not os.path.exists(actual):
         actual = None
     if not elegido.lower().startswith("kie"):
         if actual:
-            prompt, refs = _con_la_actual(prompt, refs, actual, MAX_REFS_OPENAI)
+            prompt, refs = _con_la_actual(prompt, refs, actual, MAX_REFS_OPENAI,
+                                          solo_prompt)
         return _generar_openai(prompt, refs, quality=quality,
                                tamano=tamano, api_key=api_key,
                                reintentos=reintentos)
@@ -922,7 +934,7 @@ def generar(prompt, referencias, *, quality="low", tamano="apaisado",
     if actual:
         maximo = int(os.environ.get("KIE_MAX_REFS") or
                      kie.MODELOS.get(modelo, {}).get("max_refs", 8))
-        prompt, refs = _con_la_actual(prompt, refs, actual, maximo)
+        prompt, refs = _con_la_actual(prompt, refs, actual, maximo, solo_prompt)
     try:
         return kie.generar(prompt, refs, modelo=modelo, quality=quality,
                            tamano=tamano)
