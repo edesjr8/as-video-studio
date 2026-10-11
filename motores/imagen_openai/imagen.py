@@ -592,7 +592,7 @@ def _al_dia(destino, origen):
         return False
 
 
-def generar(prompt, referencias, *, quality="low", tamano="apaisado",
+def _generar_openai(prompt, referencias, *, quality="low", tamano="apaisado",
             api_key=None, reintentos=6):
     # Sin referencias esta llamada NO se puede hacer, y hay que decirlo aqui.
     # Motivo: requests solo pone 'multipart/form-data' cuando files no esta
@@ -829,6 +829,87 @@ def _sin_saldo(respuesta):
     return ("insufficient_quota" in texto
             or "no credits remaining" in texto
             or "exceeded your current quota" in texto)
+
+
+# ------------------------------------------------------------ proveedores
+#
+# AÑADIDO (Easypanel): elegir quien dibuja con variables de entorno, sin tocar
+# el resto del Estudio.
+#
+#   IMAGEN_GENERAR   = openai | kie:<modelo>     (planos, laminas, hojas)
+#   IMAGEN_CORREGIR  = openai | kie:<modelo>     ("Regenerar imagen" con nota)
+#
+# Si IMAGEN_CORREGIR no esta, se usa lo mismo que IMAGEN_GENERAR. Sin ninguna
+# de las dos, todo sigue yendo a OpenAI como siempre.
+_CONTEXTO = threading.local()
+
+
+class contexto:
+    """Lo pone _producir_imagen al rehacer un plano que el humano rechazo:
+    marca la llamada como CORRECCION y dice cual es la imagen actual."""
+
+    def __init__(self, corregir=False, actual=None):
+        self.corregir, self.actual = corregir, actual
+
+    def __enter__(self):
+        self._previo = getattr(_CONTEXTO, "valor", None)
+        _CONTEXTO.valor = {"corregir": self.corregir, "actual": self.actual}
+        return self
+
+    def __exit__(self, *exc):
+        _CONTEXTO.valor = self._previo
+        return False
+
+
+def _proveedor(corregir):
+    generar_cfg = (os.environ.get("IMAGEN_GENERAR") or "openai").strip()
+    if corregir:
+        return (os.environ.get("IMAGEN_CORREGIR") or generar_cfg).strip()
+    return generar_cfg
+
+
+def _modulo_kie():
+    import importlib.util
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kie.py")
+    spec = importlib.util.spec_from_file_location("estudio_imagen_kie", ruta)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_KIE = []
+
+
+def generar(prompt, referencias, *, quality="low", tamano="apaisado",
+            api_key=None, reintentos=6):
+    ctx = getattr(_CONTEXTO, "valor", None) or {}
+    corregir = bool(ctx.get("corregir"))
+    elegido = _proveedor(corregir)
+    if not elegido.lower().startswith("kie"):
+        return _generar_openai(prompt, referencias, quality=quality,
+                               tamano=tamano, api_key=api_key,
+                               reintentos=reintentos)
+    modelo = elegido.split(":", 1)[1].strip() if ":" in elegido else "nano-banana-2"
+    if not _KIE:
+        _KIE.append(_modulo_kie())
+    kie = _KIE[0]
+    refs = list(referencias or [])
+    actual = ctx.get("actual")
+    if corregir and actual and os.path.exists(actual):
+        # la imagen actual va AL FINAL para no mover la numeracion de las
+        # referencias que cita el prompt; y si sobran, se recortan las otras
+        maximo = int(os.environ.get("KIE_MAX_REFS") or
+                     kie.MODELOS.get(modelo, {}).get("max_refs", 8))
+        refs = refs[:max(maximo - 1, 0)] + [actual]
+        prompt = (prompt + "\n\nIMPORTANTE: la ULTIMA imagen adjunta es la "
+                  "version actual de este plano. Conservala igual en todo "
+                  "(composicion, personajes, estilo, colores) y cambia "
+                  "SOLO lo que pide la indicacion.")
+    try:
+        return kie.generar(prompt, refs, modelo=modelo, quality=quality,
+                           tamano=tamano)
+    except kie.SinSaldoKie as fallo:
+        raise SinSaldo(str(fallo)) from fallo
 
 
 def generar_lote(trabajos, *, concurrencia=4):
