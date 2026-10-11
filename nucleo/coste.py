@@ -750,6 +750,23 @@ def _medir_imagen(original):
         meta = meta if isinstance(meta, dict) else {}
         calidad = kwargs.get("quality") or meta.get("quality") or "low"
         tamano = meta.get("tamano") or kwargs.get("tamano") or "apaisado"
+        if str(meta.get("modelo") or "").startswith("kie:"):
+            # KIE.AI NO SE TARIFA COMO OPENAI. El motor ya trae en
+            # `meta["coste"]` lo que cobro Kie (creditos x KIE_PRECIO_CREDITO);
+            # pasarlo por coste_openai lo pisaria con la tabla de OpenAI. Se
+            # anota en el mismo cubo de imagenes, que es el que pinta la
+            # pantalla, con la procedencia dicha en el detalle.
+            _anotar("openai", "imagen",
+                    cantidad={"imagenes": 1},
+                    usd=float(meta.get("coste") or 0.0),
+                    usd_estimado=True,
+                    detalle={"calidad": calidad, "tamano": tamano,
+                             "coste": {"via": "kie",
+                                       "motivo": "creditos de Kie.ai"},
+                             "modelo": meta.get("modelo"),
+                             "refs": meta.get("refs"),
+                             "segundos": meta.get("segundos")})
+            return png, meta
         registro = reportar_openai(meta.get("usage"), calidad, tamano,
                                    detalle={"modelo": meta.get("modelo"),
                                             "refs": meta.get("refs"),

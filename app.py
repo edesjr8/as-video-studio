@@ -457,6 +457,17 @@ def _plan_de_ejecucion(ctx, paso_id, cuerpo):
         return None
     sucias = ctx.estado.unidades_obsoletas(paso_id)
     declaradas = ctx.estado.unidades_declaradas(paso_id)
+    # LOS PLANOS QUE FALLARON EN LA ULTIMA TANDA tambien van. No estan
+    # declarados (un plano solo se declara cuando lleva params), asi que no
+    # salen como sucios; sin esto, una lista de sucias los dejaria fuera. Sin
+    # lista (pasada normal) no hace falta: el paso genera todo lo que falta.
+    if paso_id == "assets":
+        fallidos = (ctx.estado.salidas("assets") or {}).get("planos_fallidos")
+        if fallidos:
+            if isinstance(fallidos, list) and sucias \
+                    and len(sucias) < len(declaradas):
+                return sorted(set(sucias) | {f"escena:{s}" for s in fallidos})
+            return None
     # rehacer solo lo sucio es el caso normal; si esta todo sucio da igual y sale
     # mas barato dejar que el paso decida sin lista
     if sucias and len(sucias) < len(declaradas):
@@ -5532,7 +5543,15 @@ def _esta_al_dia(ctx, tarea):
         # `al_dia` y no `estado_de`: el trabajo de la tanda se registra EN UN
         # PASO, asi que preguntar por el estado devuelve "ejecutando" -- el
         # suyo propio -- y la tanda se rehacia a si misma entera.
-        return ctx.estado.al_dia(tid)
+        if not ctx.estado.al_dia(tid):
+            return False
+        # UNA TANDA DE PLANOS CON FALLOS NO ESTA AL DIA. Se publico lo que
+        # salio (p6_assets) y los que fallaron se quedaron sin imagen: hasta
+        # que una pasada los saque, «Generar lo pendiente» tiene que volver a
+        # pasar por assets, que solo genera lo que falta.
+        if tid == "assets":
+            return not (ctx.estado.salidas("assets") or {}).get("n_planos_fallidos")
+        return True
     if tid == "escenarios":
         catalogo = (ctx.estado.params("assets") or {}).get("catalogo") or {}
         return bool(catalogo.get("sets") or catalogo.get("reparto"))

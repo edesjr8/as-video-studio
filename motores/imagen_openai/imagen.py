@@ -880,31 +880,49 @@ def _modulo_kie():
 _KIE = []
 
 
+#: Cuantas imagenes de entrada admite /v1/images/edits de OpenAI.
+MAX_REFS_OPENAI = 16
+
+AVISO_CORRECCION = (
+    "\n\nIMPORTANTE: la ULTIMA imagen adjunta es la version actual de este "
+    "plano. Conservala igual en todo (composicion, personajes, estilo, "
+    "colores) y cambia SOLO lo que pide la indicacion.")
+
+
+def _con_la_actual(prompt, refs, actual, maximo):
+    """Una CORRECCION lleva la imagen actual como ULTIMA referencia.
+
+    Al final para no mover la numeracion de las referencias que cita el
+    prompt; y si no caben todas, se recortan las otras, nunca la actual.
+    """
+    refs = [r for r in refs if r != actual]
+    refs = refs[:max(maximo - 1, 0)] + [actual]
+    return prompt + AVISO_CORRECCION, refs
+
+
 def generar(prompt, referencias, *, quality="low", tamano="apaisado",
             api_key=None, reintentos=6):
     ctx = getattr(_CONTEXTO, "valor", None) or {}
     corregir = bool(ctx.get("corregir"))
     elegido = _proveedor(corregir)
+    refs = list(referencias or [])
+    actual = ctx.get("actual") if corregir else None
+    if actual and not os.path.exists(actual):
+        actual = None
     if not elegido.lower().startswith("kie"):
-        return _generar_openai(prompt, referencias, quality=quality,
+        if actual:
+            prompt, refs = _con_la_actual(prompt, refs, actual, MAX_REFS_OPENAI)
+        return _generar_openai(prompt, refs, quality=quality,
                                tamano=tamano, api_key=api_key,
                                reintentos=reintentos)
     modelo = elegido.split(":", 1)[1].strip() if ":" in elegido else "nano-banana-2"
     if not _KIE:
         _KIE.append(_modulo_kie())
     kie = _KIE[0]
-    refs = list(referencias or [])
-    actual = ctx.get("actual")
-    if corregir and actual and os.path.exists(actual):
-        # la imagen actual va AL FINAL para no mover la numeracion de las
-        # referencias que cita el prompt; y si sobran, se recortan las otras
+    if actual:
         maximo = int(os.environ.get("KIE_MAX_REFS") or
                      kie.MODELOS.get(modelo, {}).get("max_refs", 8))
-        refs = refs[:max(maximo - 1, 0)] + [actual]
-        prompt = (prompt + "\n\nIMPORTANTE: la ULTIMA imagen adjunta es la "
-                  "version actual de este plano. Conservala igual en todo "
-                  "(composicion, personajes, estilo, colores) y cambia "
-                  "SOLO lo que pide la indicacion.")
+        prompt, refs = _con_la_actual(prompt, refs, actual, maximo)
     try:
         return kie.generar(prompt, refs, modelo=modelo, quality=quality,
                            tamano=tamano)

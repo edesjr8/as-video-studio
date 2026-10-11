@@ -3168,8 +3168,13 @@ def _recolocar_escenas(carpeta, escenas):
     return informe
 
 def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
-                     forzar=False, notas_repaso=None, proyecto=None):
+                     forzar=False, notas_repaso=None, proyecto=None,
+                     fallidos=None):
     """Genera los planos y devuelve el coste. En fila o en cadenas paralelas.
+
+    `fallidos` recoge {uid: motivo} de los planos que no han salido. Un plano
+    que falla no para la tanda: se queda fuera de `resultados` (o con su
+    imagen anterior, si la tenia) y el resto sigue.
 
     Por que cadenas y no planos sueltos
     -----------------------------------
@@ -3212,7 +3217,9 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
     # el candado protege lo que comparten las cadenas: el diccionario de
     # resultados, el coste acumulado y el contador de avance
     cerrojo = threading.Lock()
-    estado = {"coste": 0.0, "hechas": 0}
+    estado = {"coste": 0.0, "hechas": 0, "sin_saldo": None}
+    if fallidos is None:
+        fallidos = {}
 
     def anunciar(sid):
         with cerrojo:
@@ -3301,149 +3308,183 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                     resultados[uid] = ficha
                 continue
 
-            if cartelas.sin_imagen(escena):
-                # UNA CARTELA DE FONDO NEGRO NO DEJA IMAGEN, y es deliberado.
-                #
-                # Aqui se rasterizaba a PNG para que la rejilla de planos
-                # tuviera algo que enseñar. El problema: como se ve una cartela
-                # depende del grafismo (la paleta y el set de diseño), que vive
-                # en los params de ROTULOS -- y este paso no los ve. O sea que
-                # la rejilla enseñaba una cartela dibujada con unos colores y el
-                # video llevaba otra. Es justo la clase de mentira que las
-                # muestras de este sistema existen para no contar.
-                #
-                # Ahora no hay fichero: la pantalla pide el SVG al servidor (que
-                # si ve el grafismo) y p7 dibuja el del video con la misma
-                # llamada. Un solo sitio, siempre al dia, y una rasterizacion
-                # menos por cartela en cada tanda.
-                meta = {"origen": "cartela", "coste": 0.0,
-                        "plantilla": escena["cartela"].get("plantilla")}
-                prompt = ""
-                referencias = []
-            elif escena.get("sigue_a"):
-                # LA SEGUNDA MITAD DE UN PLANO QUE DURA EL DOBLE. Es la misma
-                # imagen: no se genera ni se paga, se copia. Ver
-                # _estirar_cabeceras -- lo que dura mas es el plano, no el
-                # rotulo pegado sobre otro dibujo.
-                fuente = os.path.join(dirs["escenas"],
-                                      f"{escena['sigue_a']}.png")
-                if not os.path.exists(fuente):
-                    raise RuntimeError(f"{sid}: sigue a {escena['sigue_a']} y esa "
-                                       f"imagen no esta generada todavia")
-                medios.copiar(fuente, destino)
-                meta = {"origen": "sigue", "coste": 0.0,
-                        "sigue_a": escena["sigue_a"]}
-                prompt = ""
-                referencias = []
-            elif escena.get("componente"):
-                fuente = os.path.join(dirs["componentes"],
-                                      f"{escena['componente']}.png")
-                if not os.path.exists(fuente):
-                    raise RuntimeError(f"{sid}: falta el componente "
-                                       f"{escena['componente']}")
-                medios.copiar(fuente, destino)
-                meta = {"origen": "componente", "coste": 0.0}
-                prompt = ""
-                referencias = []
-            else:
-                # La cadena manda siempre, tambien en fila: es el orden DEL PLAN
-                # dentro de ese sitio, y comparando ids no lo era -- los ids se
-                # heredan del plan anterior y dejan de ir en orden --. Asi los dos
-                # caminos dan exactamente las mismas referencias.
-                referencias = _referencias_escena(
-                    escena, plan, dirs, p, dirs["cache"], previas,
-                    anteriores=orden_cadena, notas=notas_repaso)
-                nota_texto = _texto_feedback(
-                    _ajustes_unidad(p, uid).get("feedback"))
-                escena_final = escena
-                corregido = None
-                # EL CORRECTOR, solo cuando hay nota y alguien ha pedido rehacer
-                # ESTE plano: es una llamada al CLI por imagen, y una tanda
-                # entera de planos sucios no la merece. Con nota y a mano si:
-                # es la diferencia entre «adjunta lo de siempre» y «mira las
-                # imagenes y adjunta lo que la nota pide» (pasos/corrector.py).
-                if nota_texto and pedida and _corrector_activo(p):
-                    corregido = _corregir_con_agente(
-                        escena, plan, dirs, p, trabajo, notas_repaso, proyecto,
-                        nota_texto, avisar)
-                if corregido and not corregido.get("error"):
-                    escena_final = dict(escena, prompt=corregido["escena"],
-                                        personajes=corregido["personajes"])
-                    # las mismas clases y las mismas frases que en la primera
-                    # generacion (frase_de_referencia); el corrector solo
-                    # elige cuales y anade el detalle
-                    motor_imagen = medios.motor("imagen_openai/imagen.py")
-                    referencias = (
-                        list(_referencias_estilo(p, dirs["cache"], escena_final))
-                        + [dict(r, ruta=motor_imagen.normalizar(r["ruta"],
-                                                                dirs["cache"]))
-                           for r in corregido["referencias"]])
-                prompt = _prompt_completo(
-                    escena_final, referencias, p["estilo"],
-                    feedback=nota_texto,
-                    idioma=plan.get("idioma") or "",
-                    formato=plan.get("formato") or "",
-                    fichas_reparto=plan.get("assets"))
-                # SI EL HUMANO HA PEDIDO REHACERLA, rehacerla de verdad: ni el
-                # arte adoptado ni la cache valen, porque con el mismo prompt la
-                # cache devuelve exactamente la que acaba de rechazar.
-                #
-                # Y SOLO SI LO HA PEDIDO. Aqui ponia `forzar or unidades is not
-                # None`, o sea que bastaba con que la tanda fuera dirigida a
-                # unidades concretas -- que es justo lo que hace REPARAR lo que
-                # se ha quedado sucio, sin que nadie rechace nada. Con eso, cada
-                # reparacion volvia a pagar imagenes identicas: medido el 31-08,
-                # 14 planos con la firma SIN cambiar y su PNG en el banco,
-                # 0,55 $. Es el ultimo resto de la deduccion vieja que el
-                # comentario de `_generar_escenas` da por retirada.
-                meta = _producir_imagen(sid, prompt,
-                                        [r["ruta"] for r in referencias],
-                                        destino, p,
-                                        # y para la que SI se ha pedido,
-                                        # saltarse la cache: con el mismo
-                                        # prompt devolveria la que se acaba de
-                                        # rechazar
-                                        rehacer=(pedida and forzar
-                                                 and os.path.exists(destino)),
-                                        # al tamano del formato del video: un
-                                        # plano vertical se PIDE vertical, no
-                                        # se recorta de uno apaisado
-                                        tamano=p2_brief.comun.ficha_formato(
-                                            plan.get("formato"))["tamano_imagen"])
-                if corregido:
-                    meta = dict(meta, corrector={
-                        k: corregido.get(k) for k in
-                        ("alcance", "personajes", "escena", "referencias",
-                         "porque", "error", "modelo", "esfuerzo", "segundos")})
-            # Una cartela NO entra en la continuidad: las referencias de
-            # continuidad existen para que la paleta y el grosor de linea no
-            # deriven de un plano al siguiente, y pasarle al generador una
-            # pantalla negra con letras como «asi va este video» es justo lo
-            # contrario de lo que hacen. Un fotograma de un mapa REAL, menos
-            # todavia: es la unica imagen del video que no esta dibujada.
-            if not _sin_imagen(escena):
-                previas[sid] = destino
-                orden_cadena.append(sid)
-            ficha = {"tipo": "escena", "id": sid,
-                     # sin 'png' si es cartela: no hay fichero, y anunciar uno
-                     # que no existe deja la rejilla con un hueco roto
-                     **({} if cartelas.sin_imagen(escena)
-                        else {"png": os.path.relpath(destino, trabajo)}),
-                     "cartela": (escena.get("cartela") or {}).get("plantilla"),
-                     "narracion": escena["narracion"],
-                     "t_in": escena["t_in"], "t_out": escena["t_out"],
-                     "set": escena.get("set"),
-                     "componente": escena.get("componente"),
-                     "personajes": escena.get("personajes"),
-                     "zoom": escena.get("zoom"),
-                     "assets": plan["dependencias"].get(uid, []),
-                     "prompt": prompt,
-                     "referencias": [{"papel": r["papel"], "ruta": r["ruta"]}
-                                     for r in referencias], **meta}
-            medios.escribir_json(ficha_json, ficha)
-            with cerrojo:
-                resultados[uid] = ficha
-                estado["coste"] += float(meta.get("coste") or 0.0)
+            # UN PLANO QUE FALLA NO TUMBA LA TANDA. Antes la excepcion subia
+            # hasta el paso y no se versionaba NADA: los planos que si habian
+            # salido (y se habian pagado) no llegaban a la pantalla, que seguia
+            # ensenando la version anterior. Ahora el fallo se apunta, el plano
+            # se queda sin imagen nueva -- pendiente para la siguiente pasada,
+            # que solo genera lo que falta -- y la cadena sigue con el resto.
+            # Cancelar si sube: es una orden, no un fallo.
+            try:
+                if cartelas.sin_imagen(escena):
+                    # UNA CARTELA DE FONDO NEGRO NO DEJA IMAGEN, y es deliberado.
+                    #
+                    # Aqui se rasterizaba a PNG para que la rejilla de planos
+                    # tuviera algo que enseñar. El problema: como se ve una cartela
+                    # depende del grafismo (la paleta y el set de diseño), que vive
+                    # en los params de ROTULOS -- y este paso no los ve. O sea que
+                    # la rejilla enseñaba una cartela dibujada con unos colores y el
+                    # video llevaba otra. Es justo la clase de mentira que las
+                    # muestras de este sistema existen para no contar.
+                    #
+                    # Ahora no hay fichero: la pantalla pide el SVG al servidor (que
+                    # si ve el grafismo) y p7 dibuja el del video con la misma
+                    # llamada. Un solo sitio, siempre al dia, y una rasterizacion
+                    # menos por cartela en cada tanda.
+                    meta = {"origen": "cartela", "coste": 0.0,
+                            "plantilla": escena["cartela"].get("plantilla")}
+                    prompt = ""
+                    referencias = []
+                elif escena.get("sigue_a"):
+                    # LA SEGUNDA MITAD DE UN PLANO QUE DURA EL DOBLE. Es la misma
+                    # imagen: no se genera ni se paga, se copia. Ver
+                    # _estirar_cabeceras -- lo que dura mas es el plano, no el
+                    # rotulo pegado sobre otro dibujo.
+                    fuente = os.path.join(dirs["escenas"],
+                                          f"{escena['sigue_a']}.png")
+                    if not os.path.exists(fuente):
+                        raise RuntimeError(f"{sid}: sigue a {escena['sigue_a']} y esa "
+                                           f"imagen no esta generada todavia")
+                    medios.copiar(fuente, destino)
+                    meta = {"origen": "sigue", "coste": 0.0,
+                            "sigue_a": escena["sigue_a"]}
+                    prompt = ""
+                    referencias = []
+                elif escena.get("componente"):
+                    fuente = os.path.join(dirs["componentes"],
+                                          f"{escena['componente']}.png")
+                    if not os.path.exists(fuente):
+                        raise RuntimeError(f"{sid}: falta el componente "
+                                           f"{escena['componente']}")
+                    medios.copiar(fuente, destino)
+                    meta = {"origen": "componente", "coste": 0.0}
+                    prompt = ""
+                    referencias = []
+                else:
+                    # La cadena manda siempre, tambien en fila: es el orden DEL PLAN
+                    # dentro de ese sitio, y comparando ids no lo era -- los ids se
+                    # heredan del plan anterior y dejan de ir en orden --. Asi los dos
+                    # caminos dan exactamente las mismas referencias.
+                    referencias = _referencias_escena(
+                        escena, plan, dirs, p, dirs["cache"], previas,
+                        anteriores=orden_cadena, notas=notas_repaso)
+                    nota_texto = _texto_feedback(
+                        _ajustes_unidad(p, uid).get("feedback"))
+                    escena_final = escena
+                    corregido = None
+                    if estado["sin_saldo"]:
+                        # sin saldo, cada plano que queda fallaria igual: no
+                        # se llama a la API y se deja pendiente
+                        raise RuntimeError(estado["sin_saldo"])
+                    # EL CORRECTOR, solo cuando hay nota y alguien ha pedido rehacer
+                    # ESTE plano: es una llamada al CLI por imagen, y una tanda
+                    # entera de planos sucios no la merece. Con nota y a mano si:
+                    # es la diferencia entre «adjunta lo de siempre» y «mira las
+                    # imagenes y adjunta lo que la nota pide» (pasos/corrector.py).
+                    if nota_texto and pedida and _corrector_activo(p):
+                        corregido = _corregir_con_agente(
+                            escena, plan, dirs, p, trabajo, notas_repaso, proyecto,
+                            nota_texto, avisar)
+                    if corregido and not corregido.get("error"):
+                        escena_final = dict(escena, prompt=corregido["escena"],
+                                            personajes=corregido["personajes"])
+                        # las mismas clases y las mismas frases que en la primera
+                        # generacion (frase_de_referencia); el corrector solo
+                        # elige cuales y anade el detalle
+                        motor_imagen = medios.motor("imagen_openai/imagen.py")
+                        referencias = (
+                            list(_referencias_estilo(p, dirs["cache"], escena_final))
+                            + [dict(r, ruta=motor_imagen.normalizar(r["ruta"],
+                                                                    dirs["cache"]))
+                               for r in corregido["referencias"]])
+                    prompt = _prompt_completo(
+                        escena_final, referencias, p["estilo"],
+                        feedback=nota_texto,
+                        idioma=plan.get("idioma") or "",
+                        formato=plan.get("formato") or "",
+                        fichas_reparto=plan.get("assets"))
+                    # SI EL HUMANO HA PEDIDO REHACERLA, rehacerla de verdad: ni el
+                    # arte adoptado ni la cache valen, porque con el mismo prompt la
+                    # cache devuelve exactamente la que acaba de rechazar.
+                    #
+                    # Y SOLO SI LO HA PEDIDO. Aqui ponia `forzar or unidades is not
+                    # None`, o sea que bastaba con que la tanda fuera dirigida a
+                    # unidades concretas -- que es justo lo que hace REPARAR lo que
+                    # se ha quedado sucio, sin que nadie rechace nada. Con eso, cada
+                    # reparacion volvia a pagar imagenes identicas: medido el 31-08,
+                    # 14 planos con la firma SIN cambiar y su PNG en el banco,
+                    # 0,55 $. Es el ultimo resto de la deduccion vieja que el
+                    # comentario de `_generar_escenas` da por retirada.
+                    meta = _producir_imagen(sid, prompt,
+                                            [r["ruta"] for r in referencias],
+                                            destino, p,
+                                            # y para la que SI se ha pedido,
+                                            # saltarse la cache: con el mismo
+                                            # prompt devolveria la que se acaba de
+                                            # rechazar
+                                            rehacer=(pedida and forzar
+                                                     and os.path.exists(destino)),
+                                            # al tamano del formato del video: un
+                                            # plano vertical se PIDE vertical, no
+                                            # se recorta de uno apaisado
+                                            tamano=p2_brief.comun.ficha_formato(
+                                                plan.get("formato"))["tamano_imagen"])
+                    if corregido:
+                        meta = dict(meta, corrector={
+                            k: corregido.get(k) for k in
+                            ("alcance", "personajes", "escena", "referencias",
+                             "porque", "error", "modelo", "esfuerzo", "segundos")})
+                # Una cartela NO entra en la continuidad: las referencias de
+                # continuidad existen para que la paleta y el grosor de linea no
+                # deriven de un plano al siguiente, y pasarle al generador una
+                # pantalla negra con letras como «asi va este video» es justo lo
+                # contrario de lo que hacen. Un fotograma de un mapa REAL, menos
+                # todavia: es la unica imagen del video que no esta dibujada.
+                if not _sin_imagen(escena):
+                    previas[sid] = destino
+                    orden_cadena.append(sid)
+                ficha = {"tipo": "escena", "id": sid,
+                         # sin 'png' si es cartela: no hay fichero, y anunciar uno
+                         # que no existe deja la rejilla con un hueco roto
+                         **({} if cartelas.sin_imagen(escena)
+                            else {"png": os.path.relpath(destino, trabajo)}),
+                         "cartela": (escena.get("cartela") or {}).get("plantilla"),
+                         "narracion": escena["narracion"],
+                         "t_in": escena["t_in"], "t_out": escena["t_out"],
+                         "set": escena.get("set"),
+                         "componente": escena.get("componente"),
+                         "personajes": escena.get("personajes"),
+                         "zoom": escena.get("zoom"),
+                         "assets": plan["dependencias"].get(uid, []),
+                         "prompt": prompt,
+                         "referencias": [{"papel": r["papel"], "ruta": r["ruta"]}
+                                         for r in referencias], **meta}
+                medios.escribir_json(ficha_json, ficha)
+                with cerrojo:
+                    resultados[uid] = ficha
+                    estado["coste"] += float(meta.get("coste") or 0.0)
+            except Exception as fallo:  # noqa: BLE001
+                if type(fallo).__name__ == "Cancelado":
+                    raise
+                motivo = str(fallo) or type(fallo).__name__
+                with cerrojo:
+                    fallidos[uid] = motivo
+                    if type(fallo).__name__ == "SinSaldo":
+                        estado["sin_saldo"] = motivo
+                avisar(None, f"AVISO: el plano {sid} ha fallado y queda "
+                             f"pendiente: {motivo[:300]}")
+                # si ya tenia imagen (un «rehacer» que ha fallado), la de antes
+                # se queda: sigue siendo la mejor que hay de ese plano
+                if hecho and not cartelas.sin_imagen(escena):
+                    previa = medios.leer_json(ficha_json, {}) or {
+                        "tipo": "escena", "png": os.path.relpath(destino, trabajo)}
+                    previa = dict(previa, origen="conservado", error=motivo)
+                    if not _sin_imagen(escena):
+                        previas[sid] = destino
+                        orden_cadena.append(sid)
+                    with cerrojo:
+                        resultados[uid] = previa
+                continue
 
     # En fila tambien se va por grupos: es el MISMO reparto, un hilo detras de
     # otro. Asi «en fila» y «a la vez» dejan de ser dos caminos distintos con dos
@@ -4413,10 +4454,25 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
         medios.escribir_json(os.path.join(trabajo, "dependencias.json"),
                              plan["dependencias"])
         return _salidas_parciales(plan, resultados, inventario, necesarios, avisar)
+    fallidos = {}
     coste = _generar_escenas(plan, dirs, p, trabajo, toca, unidades,
                              resultados, avisar, forzar=rehacer,
                              notas_repaso=_notas_del_repaso(proyecto),
-                             proyecto=proyecto)
+                             proyecto=proyecto, fallidos=fallidos)
+    if fallidos:
+        # SE PUBLICA LO QUE HA SALIDO. Los planos que fallaron se quedan sin
+        # imagen nueva y la version dice cuales son (`planos_fallidos`); la
+        # siguiente pasada normal solo genera lo que falta, asi que reintentar
+        # no vuelve a pagar lo que ya esta. Solo si no ha salido NADA se
+        # falla como antes: una version sin nada nuevo no publica nada.
+        nuevos = [uid for uid, ficha in resultados.items()
+                  if uid.startswith("escena:") and uid not in fallidos
+                  and ficha.get("origen") != "conservado"]
+        if not nuevos:
+            uid, motivo = sorted(fallidos.items())[0]
+            raise RuntimeError(
+                f"no ha salido ningun plano: {len(fallidos)} fallaron. "
+                f"{uid.split(':', 1)[-1]}: {motivo}")
 
     avisar(0.96, "comprobando que no hay planos repetidos")
     # Los que comparten imagen A PROPOSITO salen del PLAN: la segunda mitad de
@@ -4448,10 +4504,15 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
     # a completar() solo van las unidades que se han rehecho de verdad: si se
     # sellara tambien lo conservado, una unidad obsoleta que nadie ha tocado
     # pasaria por fresca y ya nunca se rehria
+    #
+    # Y los que han FALLADO tampoco: se quedan con su sello anterior (o sin
+    # ninguno), que es lo que los deja pendientes para la siguiente pasada.
     if pedidas is None:
-        rehechas = dict(resultados)
+        rehechas = {uid: ficha for uid, ficha in resultados.items()
+                    if uid not in fallidos}
     else:
-        rehechas = {uid: ficha for uid, ficha in resultados.items() if uid in pedidas}
+        rehechas = {uid: ficha for uid, ficha in resultados.items()
+                    if uid in pedidas and uid not in fallidos}
     conservadas = sorted(uid for uid in resultados if uid not in rehechas)
 
     generadas = sum(1 for r in resultados.values() if r.get("origen") == "generada")
@@ -4473,7 +4534,13 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
             f"{len(escenas)} planos, {len(necesarios)} assets, "
             f"{camaras['cartas_distintas']} clases de encuadre "
             f"({camaras['planos_repetidos']} seguidos de la misma familia), "
-            f"{generadas} imagenes nuevas, {coste:.3f} USD"),
+            f"{generadas} imagenes nuevas, {coste:.3f} USD"
+            + (f" · {len(fallidos)} planos fallaron y quedan pendientes: "
+               f"«Generar lo pendiente» los reintenta" if fallidos else "")),
+        # lista de ids (no un dict con los motivos) para que _aligerar no la
+        # resuma; el motivo de cada uno sale en los avisos del trabajo
+        "planos_fallidos": sorted(uid.split(":", 1)[-1] for uid in fallidos),
+        "n_planos_fallidos": len(fallidos),
     }
     avisar(1.0, salidas["resumen"])
     # Los planos que este recorte ha dejado fuera. Van en el resultado para que

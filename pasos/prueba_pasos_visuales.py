@@ -1108,6 +1108,7 @@ def probar_render(proyecto, estado, params):
     probar_el_corte_no_se_mueve_solo()
     probar_planificar_no_encoge(proyecto, params)
     probar_rehacer_uno_rehace_uno(proyecto, estado, params)
+    probar_plano_que_falla_no_tumba_la_tanda(proyecto, estado)
     return resultado
 
 
@@ -1252,6 +1253,61 @@ def probar_el_corte_no_se_mueve_solo():
     igual(segmentar.heredar(otro, previas, minimo=1.0, maximo=4.0, reparto={}), [],
           "y un texto que ya no se reconoce NO hereda nada: se corta de cero, "
           "que es lo unico honesto cuando lo de antes ya no esta")
+
+def probar_plano_que_falla_no_tumba_la_tanda(proyecto, estado):
+    """Un plano que falla no se lleva por delante a los que si salieron.
+
+    Antes la excepcion de UN plano subia hasta el paso y no se versionaba nada:
+    la seccion Imagenes seguia ensenando la version anterior aunque el resto de
+    la tanda se hubiera generado (y pagado). Ahora se publica lo que salio y
+    el que fallo queda pendiente, dicho en las salidas.
+    """
+    print("\n  [un plano que falla no tumba la tanda]")
+    params = estado.params("assets")
+    plan = p6_assets.plan_actual(proyecto)
+    con_imagen = [e["id"] for e in plan["escenas"]
+                  if not (e.get("sigue_a") or e.get("componente")
+                          or p6_assets.cartelas.sin_imagen(e))]
+    ok(len(con_imagen) >= 2, "hay al menos dos planos dibujados que probar")
+    bueno, malo = con_imagen[0], con_imagen[1]
+    original = p6_assets._producir_imagen
+
+    def falla_uno(nombre, *args, **kwargs):
+        if nombre == malo:
+            raise RuntimeError("Kie.ai: la imagen fallo (prueba)")
+        return original(nombre, *args, **kwargs)
+
+    p6_assets._producir_imagen = falla_uno
+    try:
+        hecho = p6_assets.ejecutar(proyecto, params, avisador("p6"),
+                                   unidades=[f"escena:{bueno}", f"escena:{malo}"],
+                                   rehacer=True)
+        selladas = sorted(u for u in (hecho["unidades"] or {})
+                          if u.startswith("escena:"))
+        igual(selladas, [f"escena:{bueno}"],
+              "se sella el plano que salio y no el que fallo")
+        igual(hecho["salidas"].get("planos_fallidos"), [malo],
+              "las salidas dicen que plano fallo")
+        ok("pendientes" in hecho["salidas"]["resumen"],
+           "y el resumen lo cuenta")
+        ficha_mala = hecho["todas"].get(f"escena:{malo}") or {}
+        ok(ficha_mala.get("png") and ficha_mala.get("error"),
+           "el que fallo conserva su imagen anterior y apunta el error")
+
+        def falla_todo(nombre, *args, **kwargs):
+            raise RuntimeError("Kie.ai: la imagen fallo (prueba)")
+
+        p6_assets._producir_imagen = falla_todo
+        try:
+            p6_assets.ejecutar(proyecto, params, avisador("p6"),
+                               unidades=[f"escena:{malo}"], rehacer=True)
+            ok(False, "si no sale NINGUN plano, el paso falla como antes")
+        except RuntimeError as fallo:
+            ok("ningun plano" in str(fallo),
+               f"si no sale NINGUN plano, el paso falla como antes ({fallo})")
+    finally:
+        p6_assets._producir_imagen = original
+
 
 def probar_imagen_sigue_a_su_frase():
     """Una imagen es de lo que DICE su plano, no del numero que le toco.
