@@ -4683,6 +4683,139 @@ def servir_imagen_repaso(pid: str, nombre: str, peticion: Request):
     return servir_fichero(peticion, ruta)
 
 
+# ----------------------------------------------------------------- publicacion
+#
+# Miniaturas, titulos, descripcion y tags (pasos/publicacion.py). No es un paso
+# del grafo: lo que se hace aqui no entra en ninguna firma ni deja nada
+# obsoleto, y vive en su propia carpeta del proyecto.
+
+def _publicacion():
+    if PASOS_MODULOS is None:
+        raise ErrorApi(503, f"los pasos no se han podido cargar: {ERROR_PASOS}")
+    return PASOS_MODULOS.publicacion
+
+
+def _vista_publicacion(ctx):
+    """Lo guardado, con la descripcion lista para pegar y la URL de cada imagen."""
+    publicacion = _publicacion()
+    datos = publicacion.leer(ctx.proyecto)
+    base = f"/api/proyectos/{ctx.id}/publicacion/imagenes"
+    for ficha in datos.get("miniaturas") or []:
+        for version in ficha.get("versiones") or []:
+            for clave in ("fondo", "final"):
+                if version.get(clave):
+                    # EL SELLO, porque recomponer el texto reescribe el MISMO
+                    # fichero: sin el, el navegador ensena la de su cache
+                    ruta = os.path.join(publicacion.carpeta(ctx.proyecto),
+                                        "miniaturas", version[clave])
+                    sello = int(os.path.getmtime(ruta) * 1000) \
+                        if os.path.exists(ruta) else 0
+                    version[f"url_{clave}"] = f"{base}/{version[clave]}?v={sello}"
+        activa = next((v for v in ficha.get("versiones") or []
+                       if v.get("n") == ficha.get("activa")), None)
+        ficha["url"] = (activa or {}).get("url_final")
+    datos["descripcion_completa"] = publicacion.descripcion_completa(datos)
+    datos["posiciones"] = list(publicacion.POSICIONES)
+    datos["fuentes"] = sorted(PASOS_MODULOS.tipografia.FUENTES)
+    return datos
+
+
+def _motor_imagen_de(datos):
+    motor = str(datos.get("motor") or "openai").strip()
+    if motor != "openai" and not re.fullmatch(r"kie:[\w./-]+", motor):
+        raise ErrorApi(400, "'motor' es 'openai' o 'kie:<modelo>' "
+                            "(p. ej. kie:nano-banana-pro)")
+    return motor
+
+
+@app.get("/api/proyectos/{pid}/publicacion")
+def leer_publicacion(pid: str):
+    return _vista_publicacion(contexto(pid))
+
+
+def _correr_director(avisar, ctx, ajuste):
+    datos = _publicacion().dirigir(ctx.proyecto, ctx.estado, ajuste=ajuste,
+                                   avisar=avisar)
+    ctx.bitacora.anotar("publicacion_dirigida", None, {
+        "miniaturas": len(datos.get("miniaturas") or []),
+        "titulos": len(datos.get("titulos") or []), "ajuste": ajuste})
+    return {"miniaturas": len(datos.get("miniaturas") or []),
+            "titulos": len(datos.get("titulos") or [])}
+
+
+@app.post("/api/proyectos/{pid}/publicacion/dirigir", status_code=202)
+def dirigir_publicacion(pid: str, cuerpo: dict = Body(default=None)):
+    """El director propone miniaturas, titulos, descripcion y tags."""
+    ctx = contexto(pid)
+    ajuste = _ajuste_cli(_cuerpo(cuerpo))
+    trabajo_id = ctx.gestor.lanzar("publicacion", _correr_director, ctx, ajuste)
+    _registrar_trabajo(trabajo_id, ctx.id)
+    return {"trabajo_id": trabajo_id, "ajuste": ajuste,
+            "trabajo": ctx.gestor.estado(trabajo_id),
+            "eventos": f"/api/trabajos/{trabajo_id}/eventos"}
+
+
+def _correr_miniatura(avisar, ctx, mid, motor, nota):
+    ficha = _publicacion().disenar_miniatura(ctx.proyecto, ctx.estado, mid,
+                                             motor=motor, nota=nota, avisar=avisar)
+    ctx.bitacora.anotar("miniatura_disenada", None, {
+        "miniatura": mid, "motor": motor, "nota": nota,
+        "version": ficha.get("activa")})
+    return {"miniatura": mid, "version": ficha.get("activa")}
+
+
+@app.post("/api/proyectos/{pid}/publicacion/miniaturas/{mid}/disenar",
+          status_code=202)
+def disenar_miniatura(pid: str, mid: str, cuerpo: dict = Body(default=None)):
+    """Dibuja el fondo de una miniatura (o lo corrige con una nota) y la compone.
+
+    Cuesta una imagen. `motor` es el del selector de la pantalla."""
+    ctx = contexto(pid)
+    datos = _cuerpo(cuerpo)
+    publicacion = _publicacion()
+    try:
+        publicacion._miniatura(publicacion.leer(ctx.proyecto), mid)
+    except KeyError as fallo:
+        raise ErrorApi(404, str(fallo))
+    trabajo_id = ctx.gestor.lanzar(f"miniatura:{mid}", _correr_miniatura, ctx, mid,
+                                   _motor_imagen_de(datos),
+                                   str(datos.get("nota") or "").strip())
+    _registrar_trabajo(trabajo_id, ctx.id)
+    return {"trabajo_id": trabajo_id, "trabajo": ctx.gestor.estado(trabajo_id),
+            "eventos": f"/api/trabajos/{trabajo_id}/eventos"}
+
+
+@app.put("/api/proyectos/{pid}/publicacion/miniaturas/{mid}")
+def editar_miniatura(pid: str, mid: str, cuerpo: dict = Body(default=None)):
+    """Texto, posicion, colores o version activa. Recompone sin pagar nada."""
+    ctx = contexto(pid)
+    try:
+        _publicacion().editar_miniatura(ctx.proyecto, mid, _cuerpo(cuerpo))
+    except KeyError as fallo:
+        raise ErrorApi(404, str(fallo))
+    except ValueError as fallo:
+        raise ErrorApi(400, str(fallo))
+    return _vista_publicacion(ctx)
+
+
+@app.put("/api/proyectos/{pid}/publicacion")
+def editar_publicacion(pid: str, cuerpo: dict = Body(default=None)):
+    """Titulo elegido, descripcion, capitulos, tags y hashtags retocados a mano."""
+    ctx = contexto(pid)
+    _publicacion().editar_textos(ctx.proyecto, _cuerpo(cuerpo))
+    return _vista_publicacion(ctx)
+
+
+@app.get("/api/proyectos/{pid}/publicacion/imagenes/{nombre}")
+def servir_imagen_publicacion(pid: str, nombre: str, peticion: Request):
+    ctx = contexto(pid)
+    carpeta = os.path.join(_publicacion().carpeta(ctx.proyecto), "miniaturas")
+    ruta = os.path.join(carpeta, os.path.basename(nombre))
+    if not ruta_contenida(carpeta, ruta) or not os.path.exists(ruta):
+        raise ErrorApi(404, f"esa imagen no está: {nombre}")
+    return servir_fichero(peticion, ruta)
+
+
 #: EL MODO CON EL QUE SE REGENERA TRAS UN REPASO, y no es «todo» ni
 #: «pendientes»: es un tercer camino y hace falta que lo sea.
 #:

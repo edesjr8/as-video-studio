@@ -61,6 +61,9 @@ from . import p6_assets, p7_callouts, p8_render  # noqa: E402,F401
 # y repaso (lo que se escribe MIRANDO el video montado) el ultimo de los que
 # deciden: reparte notas en cambios de todos los pasos anteriores
 from . import repaso  # noqa: E402,F401
+# publicacion (miniaturas, titulos, descripcion) lee el plan y los planos de
+# p6, y no es un paso del grafo: no lo nombra nadie de los de arriba
+from . import publicacion  # noqa: E402,F401
 # presets_light va el ULTIMO: la muestra de un preset se compone con p7 y
 # con cartelas, asi que necesita el paquete entero levantado.
 # enrutar_estilo (que hay que rehacer cuando se corrige el estilo con una

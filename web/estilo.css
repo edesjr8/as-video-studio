@@ -2133,7 +2133,7 @@ body.modo-light #panel > .contenido {
 
 .nav-light {
   position: sticky; bottom: 0; z-index: 20;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(6, 1fr);
   background: var(--panel); border-top: 1px solid var(--linea);
   /* `auto` arriba la empuja al fondo cuando sobra sitio; de borde a borde a los
      lados, cancelando el relleno lateral del panel. Va TODO en la abreviada: el
@@ -2433,3 +2433,17 @@ button.avisa:hover:not(:disabled) { border-color: var(--aviso); }
 }
 .previa-feedback .aportadas { margin: 6px 0 8px; }
 .previa-feedback .zona-suelta { padding: 9px 11px; font-size: 12px; }
+
+/* ------------------------------------------------------------ publicación */
+.pub-rejilla { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; width: 100%; }
+.pub-mini { background: var(--hueco); border: 1px solid var(--linea); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.pub-mini img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; cursor: zoom-in; background: var(--lienzo); }
+.pub-vacia { width: 100%; aspect-ratio: 16 / 9; border-radius: 6px; border: 1px dashed var(--linea); display: flex; align-items: center; justify-content: center; color: var(--tenue); background: var(--lienzo); }
+.pub-mini .fila { flex-wrap: wrap; gap: 8px; align-items: center; }
+.pub-mini input[type="color"] { width: 34px; height: 30px; padding: 0; border: 1px solid var(--linea); border-radius: 6px; background: none; }
+.pub-concepto b { display: block; margin-bottom: 4px; }
+.pub-titulo { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--linea-suave); width: 100%; }
+.pub-titulo.elegido { background: var(--marcado); border-color: var(--acento); }
+.pub-capitulos { display: flex; flex-direction: column; gap: 2px; width: 100%; }
+.pub-vivo { width: 100%; }
+@media (max-width: 600px) { .pub-rejilla { grid-template-columns: 1fr; } }

@@ -174,6 +174,19 @@ Reglas que valen para toda la API y no se repiten en cada fila:
 | `GET` | `/api/proyectos/{pid}/montaje/notas` | Lo escrito sobre el vídeo terminado. No toca ninguna firma. |
 | `PUT` | `/api/proyectos/{pid}/montaje/notas` | Guarda la nota del vídeo entero. Autoguardado, como todo lo demás. |
 
+## Publicación: miniaturas, títulos y descripción
+
+No es un paso del grafo: nada de esto entra en una firma (`pasos/publicacion.py`).
+
+| | Ruta | Qué hace |
+|---|---|---|
+| `GET` | `/api/proyectos/{pid}/publicacion` | La propuesta guardada, con la descripción lista para pegar y la URL de cada miniatura. |
+| `PUT` | `/api/proyectos/{pid}/publicacion` | Título elegido, descripción, capítulos, tags y hashtags retocados a mano. |
+| `POST` | `/api/proyectos/{pid}/publicacion/dirigir` | El director propone miniaturas, títulos, descripción, capítulos y tags. Trabajo en segundo plano. |
+| `POST` | `/api/proyectos/{pid}/publicacion/miniaturas/{mid}/disenar` | Dibuja (o corrige con `nota`) el fondo de una miniatura con `motor` y la compone. Cuesta una imagen. |
+| `PUT` | `/api/proyectos/{pid}/publicacion/miniaturas/{mid}` | Texto, posición, colores, fuente o versión activa. Recompone sin pagar nada. |
+| `GET` | `/api/proyectos/{pid}/publicacion/imagenes/{nombre}` | Un fondo o una miniatura terminada. |
+
 ## Presets del canal
 
 | | Ruta | Qué hace |

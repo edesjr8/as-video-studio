@@ -502,6 +502,7 @@ const API = {
   // su fichero y no en los params (comentar no puede dejar el vídeo obsoleto);
   // lo que toca las firmas es `repasoAplicar`.
   repaso: pid => `${BASE}/api/proyectos/${encodeURIComponent(pid)}/repaso`,
+  publicacion: pid => `${BASE}/api/proyectos/${encodeURIComponent(pid)}/publicacion`,
   repasoNota: (pid, nid) => `${BASE}/api/proyectos/${encodeURIComponent(pid)}`
     + `/repaso/${encodeURIComponent(nid)}`,
   imagenesRepaso: pid => `${BASE}/api/proyectos/${encodeURIComponent(pid)}`
@@ -4981,6 +4982,8 @@ const ICONOS_NAV = {
   guion: 'M6 3h12v18H6z M9 8h6 M9 12h6 M9 16h4',
   diapositivas: 'M3 6h18v12H3z M8 6v12 M16 6v12',
   video: 'M3 5h18v14H3z M10 9l5 3-5 3z',
+  // un marco con una flecha que sale: lo que se manda fuera
+  publicacion: 'M4 10v10h16V10 M12 3v12 M8 7l4-4 4 4',
 };
 
 
@@ -5047,6 +5050,14 @@ function navLight() {
     { id: 'video', texto: 'Vídeo', puede: hayVideo, activa: sub === 'video',
       porque: hayVideo ? 'el montaje y el repaso' : 'todavía no hay nada montado',
       ir: () => { pararPrevia(); v.vista = 'video'; pintarLight(); } },
+    /* LA ÚLTIMA PARADA: lo que va ALREDEDOR del vídeo en YouTube. Pide guion
+       y nada más: con el guion el director ya sabe de qué va, y las imágenes
+       las usa si están. */
+    { id: 'publicacion', texto: 'Publicación', puede: hayGuion,
+      activa: sub === 'publicacion',
+      porque: hayGuion ? 'miniaturas, títulos, descripción y tags'
+        : 'todavía no hay guion',
+      ir: () => { pararPrevia(); v.vista = 'publicacion'; pintarLight(); } },
   ];
 
   const barra = h('nav', { clase: 'nav-light', 'aria-label': 'Pasos del vídeo' });
@@ -5225,6 +5236,7 @@ function pintarLightAhora() {
         contenido.appendChild(cajaError(APP.light.video.error));
       } else if (sub === 'video') contenido.appendChild(vistaVideoLight());
       else if (sub === 'previa') contenido.appendChild(vistaPreviaLight());
+      else if (sub === 'publicacion') contenido.appendChild(vistaPublicacionLight());
       else if (sub === 'guion') contenido.appendChild(vistaGuionLight());
       else if (sub === 'encargo_video') contenido.appendChild(vistaEncargoVideoLight());
       else contenido.appendChild(vistaElegidoLight());
@@ -11271,3 +11283,279 @@ function enLinea(texto) {
    access 'MODOS' before initialization» y deja la pantalla en blanco.
    Las funciones se izan; los const no. */
 arrancar();
+
+
+/* ================================================================ PUBLICACIÓN
+ *
+ * Lo que va ALREDEDOR del vídeo en YouTube: miniaturas, títulos, descripción,
+ * capítulos y tags (pasos/publicacion.py). No es un paso del grafo: nada de lo
+ * que se toca aquí deja obsoleto el vídeo ni cuesta una imagen, salvo pulsar
+ * «Diseñar» o «Corregir» en una miniatura.
+ *
+ * Las miniaturas son FONDO + TEXTO. El fondo lo dibuja el motor que elijas;
+ * el texto lo pone el Estudio, así que cambiar una palabra o un color se
+ * recompone al momento y gratis.
+ */
+const PUBLI = { pid: '', datos: null, cargando: false, error: '', notas: {},
+                motores: {}, guardado: null, pendiente: {} };
+
+/* Los motores de las miniaturas: los mismos que las correcciones de los planos
+   y además Nano Banana Pro, que pinta mejor una imagen que se va a mirar de
+   lejos. Con una nota y Kie se envía SOLO la nota, igual que en los planos. */
+const MOTORES_MINIATURA = [
+  { valor: 'openai', nombre: 'OpenAI' },
+  { valor: 'kie:nano-banana-2', nombre: 'Kie · Nano Banana 2' },
+  { valor: 'kie:nano-banana-pro', nombre: 'Kie · Nano Banana Pro' },
+];
+
+async function cargarPublicacion(forzar) {
+  const pid = videoAbierto().pid;
+  if (!pid || (!forzar && PUBLI.pid === pid && (PUBLI.datos || PUBLI.cargando))) return;
+  if (PUBLI.pid !== pid) Object.assign(PUBLI, { datos: null, notas: {}, pendiente: {} });
+  PUBLI.pid = pid;
+  PUBLI.cargando = true;
+  try {
+    PUBLI.datos = await pedir(API.publicacion(pid));
+    PUBLI.error = '';
+  } catch (err) { PUBLI.error = err.message; }
+  PUBLI.cargando = false;
+  if (videoAbierto().pid === pid && videoAbierto().vista === 'publicacion') pintarLight();
+}
+
+function barraPublicacion(clave) {
+  return enVivo(() => {
+    const trabajo = APP.trabajos[clave] || {};
+    if (trabajo.estado !== 'ejecutando') return null;
+    const pct = Math.round((Number(trabajo.progreso) || 0) * 100);
+    return h('div', { clase: 'meta pub-vivo' }, `${pct} % · ${trabajo.mensaje || 'trabajando…'}`);
+  });
+}
+
+function corriendoPublicacion(clave) {
+  return (APP.trabajos[clave] || {}).estado === 'ejecutando';
+}
+
+async function lanzarPublicacion(clave, url, cuerpo) {
+  const pid = videoAbierto().pid;
+  try {
+    const datos = await pedir(url, { method: 'POST', cuerpo: cuerpo || {} });
+    const tid = datos.trabajo_id;
+    seguirTrabajo(clave, tid, async trabajo => {
+      if (trabajo.estado === 'ejecutando') return;
+      if (videoAbierto().pid === pid) await cargarPublicacion(true);
+    }, () => refrescarVivosLight());
+    pintarLight();
+  } catch (err) { toast(err.message, true); }
+}
+
+function pedirDirector() {
+  lanzarPublicacion('publicacion', `${API.publicacion(videoAbierto().pid)}/dirigir`);
+}
+
+/* Lo que se teclea se guarda solo, como en el resto del Estudio: medio segundo
+   después de dejar de escribir. */
+function guardarPublicacionLuego(cambios) {
+  Object.assign(PUBLI.pendiente, cambios);
+  clearTimeout(PUBLI.guardado);
+  PUBLI.guardado = setTimeout(async () => {
+    const cuerpo = PUBLI.pendiente;
+    PUBLI.pendiente = {};
+    try {
+      const datos = await pedir(API.publicacion(videoAbierto().pid),
+                                { method: 'PUT', cuerpo });
+      PUBLI.datos.descripcion_completa = datos.descripcion_completa;
+    } catch (err) { toast(err.message, true); }
+  }, 600);
+}
+
+async function editarMiniatura(mid, cambios) {
+  try {
+    PUBLI.datos = await pedir(`${API.publicacion(videoAbierto().pid)}/miniaturas/${mid}`,
+                              { method: 'PUT', cuerpo: cambios });
+  } catch (err) { toast(err.message, true); }
+  pintarLight();
+}
+
+function copiarTexto(texto, que) {
+  try {
+    navigator.clipboard.writeText(texto || '')
+      .then(() => toast(`${que} copiado`), () => toast('no se ha podido copiar', true));
+  } catch (e) { toast('no se ha podido copiar', true); }
+}
+
+function tarjetaMiniatura(ficha) {
+  const clave = `miniatura:${ficha.id}`;
+  const corriendo = corriendoPublicacion(clave);
+  const motor = PUBLI.motores[ficha.id] || 'openai';
+  const hecha = !!ficha.url;
+  const tarjeta = h('div', { clase: 'pub-mini' });
+
+  tarjeta.appendChild(hecha
+    ? h('img', { src: `${BASE}${ficha.url}`, alt: ficha.texto || ficha.id,
+                 onclick: () => lupa(`${BASE}${ficha.url}`) })
+    : h('div', { clase: 'pub-vacia' }, 'sin diseñar todavía'));
+
+  tarjeta.appendChild(h('div', { clase: 'pub-concepto' },
+    h('b', {}, `${ficha.id} · ${ficha.concepto || ''}`),
+    ficha.porque ? h('div', { clase: 'meta' }, ficha.porque) : null,
+    ficha.emocion ? h('div', { clase: 'meta' }, `emoción: ${ficha.emocion}`) : null));
+
+  /* EL TEXTO SE EDITA AQUÍ Y SE RECOMPONE AL SALIR DEL CAMPO: es gratis, el
+     fondo no se vuelve a dibujar. */
+  const texto = h('input', { type: 'text', value: ficha.texto || '', maxlength: 60,
+    onchange: ev => editarMiniatura(ficha.id, { texto: ev.target.value }) });
+  const resaltar = h('input', { type: 'text', value: (ficha.resaltar || []).join(' '),
+    placeholder: 'palabras en color de acento',
+    onchange: ev => editarMiniatura(ficha.id,
+      { resaltar: ev.target.value.split(/\s+/).filter(Boolean) }) });
+  const posicion = h('select', {
+    onchange: ev => editarMiniatura(ficha.id, { posicion: ev.target.value }),
+  }, ...(PUBLI.datos.posiciones || []).map(p => h('option', { value: p }, p)));
+  posicion.value = ficha.posicion || 'izquierda';
+  const color = (campo, titulo) => h('input', { type: 'color', title: titulo,
+    value: ficha[campo] || '#ffffff',
+    onchange: ev => editarMiniatura(ficha.id, { [campo]: ev.target.value }) });
+  tarjeta.appendChild(h('div', { clase: 'campo' }, h('label', {}, 'Texto'),
+    cajaCampo(texto, { clase: 'linea' })));
+  tarjeta.appendChild(h('div', { clase: 'fila' },
+    cajaCampo(resaltar, { clase: 'linea' }), posicion,
+    color('color_texto', 'color del texto'),
+    color('color_acento', 'color de acento'),
+    color('color_contorno', 'color del contorno')));
+
+  if ((ficha.versiones || []).length > 1) {
+    const versiones = h('select', {
+      onchange: ev => editarMiniatura(ficha.id, { activa: Number(ev.target.value) }),
+    }, ...ficha.versiones.map(v => h('option', { value: String(v.n) },
+      `versión ${v.n} · ${v.motor}${v.nota ? ' · con nota' : ''}`)));
+    versiones.value = String(ficha.activa);
+    tarjeta.appendChild(h('div', { clase: 'fila' }, h('span', { clase: 'meta' }, 'Fondo'), versiones));
+  }
+
+  const selector = h('select', {
+    onchange: ev => { PUBLI.motores[ficha.id] = ev.target.value; },
+  }, ...MOTORES_MINIATURA.map(m => h('option', { value: m.valor }, m.nombre)));
+  selector.value = motor;
+  if (hecha) {
+    tarjeta.appendChild(campoArea(`¿Qué cambiarías de ${ficha.id}?`,
+      PUBLI.notas[ficha.id] || '', valor => { PUBLI.notas[ficha.id] = valor; },
+      'el fondo: la cara, el color, lo que sobra… (con Kie se envía solo esto)',
+      `pub-nota:${ficha.id}`));
+  }
+  tarjeta.appendChild(h('div', { clase: 'fila' }, selector,
+    h('button', {
+      clase: 'mini primario', disabled: corriendo,
+      title: 'Cuesta una imagen',
+      onclick: () => {
+        const nota = String(PUBLI.notas[ficha.id] || '').trim();
+        PUBLI.motores[ficha.id] = selector.value;
+        lanzarPublicacion(clave,
+          `${API.publicacion(videoAbierto().pid)}/miniaturas/${ficha.id}/disenar`,
+          { motor: selector.value, nota });
+      },
+    }, corriendo ? 'dibujando…'
+       : !hecha ? 'Diseñar'
+       : String(PUBLI.notas[ficha.id] || '').trim() ? 'Corregir' : 'Otra versión'),
+    hecha ? h('a', { clase: 'mini', href: `${BASE}${ficha.url}`,
+                     download: `miniatura_${ficha.id}.png` }, 'Descargar') : null));
+  tarjeta.appendChild(barraPublicacion(clave));
+  return tarjeta;
+}
+
+function vistaPublicacionLight() {
+  cargarPublicacion(false);
+  const caja = h('div', { clase: 'light-form pub' });
+  caja.appendChild(h('div', { clase: 'light-cab' },
+    h('h2', {}, 'Publicación'),
+    h('span', { clase: 'meta' }, 'miniaturas, títulos, descripción y tags'),
+    h('span', { clase: 'crece' }),
+    costeLight()));
+  if (PUBLI.error) caja.appendChild(cajaError(PUBLI.error));
+  if (PUBLI.cargando && !PUBLI.datos) {
+    caja.appendChild(h('div', { clase: 'cargando' }, 'leyendo la publicación…'));
+    return caja;
+  }
+  const d = PUBLI.datos || {};
+  const hay = (d.miniaturas || []).length || (d.titulos || []).length;
+  const dirigiendo = corriendoPublicacion('publicacion');
+
+  caja.appendChild(h('div', { clase: 'caja-info' },
+    'El director de publicación lee el guion, mira los planos y el reparto, y '
+    + 'propone miniaturas, títulos, descripción con capítulos y tags. Proponer '
+    + 'usa tu cuenta de Claude; diseñar una miniatura cuesta una imagen. Nada '
+    + 'de esto toca el vídeo.'));
+  caja.appendChild(h('div', { clase: 'fila' },
+    h('button', { clase: hay ? 'mini' : 'primario', disabled: dirigiendo,
+                  onclick: pedirDirector },
+      dirigiendo ? 'el director está trabajando…'
+        : hay ? 'Pedir otra propuesta' : 'Pedir propuesta al director'),
+    hay ? h('span', { clase: 'meta' },
+      'una propuesta nueva sustituye a esta; las imágenes ya diseñadas se quedan en la carpeta') : null));
+  caja.appendChild(barraPublicacion('publicacion'));
+  if (!hay) return caja;
+
+  caja.appendChild(bloqueLight('Miniaturas',
+    'el texto se cambia gratis; «Diseñar» y «Corregir» cuestan una imagen',
+    h('div', { clase: 'pub-rejilla' }, ...(d.miniaturas || []).map(tarjetaMiniatura))));
+
+  /* TÍTULOS: el elegido es el que va a la descripción copiada y el que se
+     edita. Cada uno dice con qué miniatura va, porque se prueban en pareja. */
+  const elegido = d.titulo_elegido || '';
+  const editor = h('input', { type: 'text', value: elegido, maxlength: 100,
+    oninput: ev => { d.titulo_elegido = ev.target.value;
+                     guardarPublicacionLuego({ titulo_elegido: ev.target.value }); } });
+  caja.appendChild(bloqueLight('Títulos', 'menos de 60 caracteres es lo que se ve entero',
+    h('div', { clase: 'campo' }, h('label', {}, 'El elegido'),
+      cajaCampo(editor, { clase: 'linea' })),
+    h('div', { clase: 'fila' },
+      h('button', { clase: 'mini', onclick: () => copiarTexto(d.titulo_elegido, 'título') },
+        'Copiar título')),
+    ...(d.titulos || []).map((titulo, i) => h('div', {
+      clase: 'pub-titulo' + (titulo.texto === elegido ? ' elegido' : '') },
+      h('span', { clase: 'meta' }, `${i + 1}.`),
+      h('div', { clase: 'crece' },
+        h('div', {}, titulo.texto),
+        h('div', { clase: 'meta' },
+          `${titulo.texto.length} car.` + (titulo.miniatura ? ` · con ${titulo.miniatura}` : '')
+          + (titulo.porque ? ` · ${titulo.porque}` : ''))),
+      h('button', { clase: 'mini', onclick: () => {
+        d.titulo_elegido = titulo.texto;
+        guardarPublicacionLuego({ titulo_elegido: titulo.texto });
+        pintarLight();
+      } }, 'Usar')))));
+
+  caja.appendChild(bloqueLight('Descripción',
+    'los capítulos y los hashtags se añaden solos al copiar',
+    campoArea('', d.descripcion || '', valor => {
+      d.descripcion = valor; guardarPublicacionLuego({ descripcion: valor });
+    }, 'la descripción', 'pub-descripcion'),
+    (d.capitulos || []).length
+      ? h('div', { clase: 'pub-capitulos' }, ...d.capitulos.map(cap =>
+        h('div', {}, h('span', { clase: 'meta' }, cap.reloj), ` ${cap.titulo}`)))
+      : h('div', { clase: 'meta' }, 'sin capítulos: YouTube pide al menos tres de 10 s'),
+    h('div', { clase: 'fila' },
+      h('button', { clase: 'mini primario',
+                    onclick: () => copiarTexto(d.descripcion_completa, 'descripción') },
+        'Copiar descripción completa'))));
+
+  const tags = h('input', { type: 'text', value: (d.tags || []).join(', '),
+    oninput: ev => {
+      d.tags = ev.target.value.split(',').map(x => x.trim()).filter(Boolean);
+      guardarPublicacionLuego({ tags: d.tags });
+    } });
+  const hashtags = h('input', { type: 'text', value: (d.hashtags || []).join(' '),
+    oninput: ev => {
+      d.hashtags = ev.target.value.split(/\s+/).filter(Boolean);
+      guardarPublicacionLuego({ hashtags: d.hashtags });
+    } });
+  caja.appendChild(bloqueLight('Tags y hashtags',
+    `${(d.tags || []).join(',').length} de 500 caracteres de tags`,
+    h('div', { clase: 'campo' }, h('label', {}, 'Tags (separados por comas)'),
+      cajaCampo(tags, { clase: 'linea' })),
+    h('div', { clase: 'campo' }, h('label', {}, 'Hashtags'),
+      cajaCampo(hashtags, { clase: 'linea' })),
+    h('div', { clase: 'fila' },
+      h('button', { clase: 'mini', onclick: () => copiarTexto((d.tags || []).join(', '), 'tags') },
+        'Copiar tags'))));
+  return caja;
+}
