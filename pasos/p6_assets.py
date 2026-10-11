@@ -2975,8 +2975,17 @@ def _producir_imagen(nombre, prompt, referencias, destino, p, rehacer=False,
 
     imagen = medios.motor("imagen_openai/imagen.py")
     try:
-        png, meta = imagen.generar(prompt, referencias, quality=p["calidad"],
-                                   tamano=tamano)
+        # AÑADIDO: si el humano pidio rehacerla, es una CORRECCION (puede ir a
+        # otro proveedor/modelo con IMAGEN_CORREGIR) y se pasa la imagen actual
+        corrige = bool(rehacer and os.path.exists(destino))
+        envoltorio = getattr(imagen, "contexto", None)
+        if envoltorio is not None:
+            with envoltorio(corregir=corrige, actual=destino if corrige else None):
+                png, meta = imagen.generar(prompt, referencias,
+                                           quality=p["calidad"], tamano=tamano)
+        else:
+            png, meta = imagen.generar(prompt, referencias, quality=p["calidad"],
+                                       tamano=tamano)
     except SystemExit as fallo:
         # el motor esta escrito como CLI y aborta con SystemExit (por ejemplo si
         # falta la clave); dentro de un hilo eso no lo captura nadie y el paso
