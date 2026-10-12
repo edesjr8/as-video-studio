@@ -1437,12 +1437,16 @@ def ejecutar_paso(pid: str, paso: str, cuerpo: dict = Body(default=None)):
     # QUIEN REDIBUJA UNA CORRECCION: el selector de la pantalla de Imagenes.
     # 'openai' manda el prompt completo de siempre; 'kie:<modelo>' manda SOLO
     # el texto de la nota (p6_assets, «solo mi texto»).
-    motor = str(datos.get("motor_correccion") or "").strip()
-    if motor:
-        if motor != "openai" and not re.fullmatch(r"kie:[\w./-]+", motor):
-            raise ErrorApi(400, "'motor_correccion' es 'openai' o "
-                                "'kie:<modelo>' (p. ej. kie:nano-banana-2)")
-        opciones["motor_correccion"] = motor
+    # Y QUIEN DIBUJA LA PASADA: el selector «Generar con» (si no viene, el
+    # paso lee el ajuste del Estudio).
+    for campo in ("motor_correccion", "motor_generar"):
+        try:
+            motor = AJUSTES.motor_valido(datos.get(campo))
+        except ValueError:
+            raise ErrorApi(400, f"'{campo}' es 'openai' o 'kie:<modelo>' "
+                                "(p. ej. kie:nano-banana-2)")
+        if motor:
+            opciones[campo] = motor
     trabajo_id = lanzar_paso(ctx, paso_id, unidades, opciones=opciones)
     return {"trabajo_id": trabajo_id, "paso": paso_id, "opciones": opciones,
             "unidades": unidades, "estado": "ejecutando",
@@ -4681,6 +4685,53 @@ def servir_imagen_repaso(pid: str, nombre: str, peticion: Request):
     if not ruta_contenida(carpeta, ruta) or not os.path.exists(ruta):
         raise ErrorApi(404, f"esa imagen no está: {nombre}")
     return servir_fichero(peticion, ruta)
+
+
+# ------------------------------------------------- rehacer todas las imagenes
+
+def _motor_de_generar():
+    """El motor que dibujara la proxima pasada, y de donde sale."""
+    elegido = AJUSTES.leer().get("motor_imagen")
+    if elegido:
+        return elegido, "el selector «Generar con»"
+    entorno = (os.environ.get("IMAGEN_GENERAR") or "").strip()
+    if entorno:
+        return entorno, "la variable IMAGEN_GENERAR del servidor"
+    return "openai", "lo de fabrica"
+
+
+@app.get("/api/proyectos/{pid}/imagenes/rehacer")
+def previsto_rehacer_imagenes(pid: str, motor: str = ""):
+    """Cuantas imagenes se volverian a dibujar y lo que costarian, ANTES de pulsar.
+
+    Son los planos con dibujo (no las cartelas, ni la segunda mitad de un plano
+    largo, ni los que son un mapa) y las hojas de personaje. Con Kie no hay
+    importe: se paga en creditos de su tarifa, que no conoce el Estudio.
+    """
+    ctx = contexto(pid)
+    p6 = PASOS_MODULOS.p6_assets
+    plan = p6.plan_actual(ctx.proyecto, "assets", estado=ctx.estado) or {}
+    planos = [e for e in plan.get("escenas") or []
+              if not (e.get("sigue_a") or e.get("componente")
+                      or p6.cartelas.sin_imagen(e))]
+    hojas = [u for u, ficha in (plan.get("assets") or {}).items()
+             if isinstance(ficha, dict) and ficha.get("tipo") == "reparto"]
+    try:
+        elegido = AJUSTES.motor_valido(motor)
+    except ValueError as fallo:
+        raise ErrorApi(400, str(fallo))
+    origen = "esta peticion"
+    if not elegido:
+        elegido, origen = _motor_de_generar()
+    calidad = ((ctx.estado.params("assets") or {}).get("calidad")
+               or AJUSTES.calidad_imagen())
+    total = len(planos) + len(hojas)
+    usd = None
+    if elegido == "openai":
+        usd = round(total * AJUSTES.coste_por_imagen(calidad)["usd_total"], 2)
+    return {"planos": len(planos), "hojas": len(hojas), "total": total,
+            "motor": elegido, "origen": origen, "calidad": calidad,
+            "usd_estimado": usd}
 
 
 # ----------------------------------------------------------------- publicacion

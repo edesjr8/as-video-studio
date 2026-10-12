@@ -7257,6 +7257,10 @@ function pieLight() {
       h('button', {
         clase: 'mini peligro', onclick: () => cancelar(CLAVE_VIDEO_LIGHT),
       }, 'Parar')) : null,
+    /* QUIEN DIBUJA: a la vista y junto al boton que gasta. Antes lo decia una
+       variable del servidor que nadie veia, y una tanda entera salio con un
+       motor que no se habia elegido en ninguna pantalla. */
+    selectorMotorGenerar(corriendo),
     conAyuda(!hayAudio
       ? 'Primero hace falta el audio: los subtitulos se colocan con sus '
         + 'tiempos, asi que sin voz no hay donde ponerlos.'
@@ -7269,6 +7273,13 @@ function pieLight() {
         onclick: () => lanzarTandaLight('video'),
       }, (hayVideo && obsoleto) ? 'Poner al día las imágenes'
          : 'Generar imágenes')),
+    /* REHACER TODAS: solo si ya hay imágenes, y con su aviso delante. */
+    (!corriendo && versionDe(v.fichas.assets || {})) ? conAyuda(
+      'Vuelve a dibujar TODOS los planos y las hojas de personaje con el motor '
+      + 'elegido, desde cero. El corte, el guion y el audio no se tocan. '
+      + 'Antes de empezar dice cuántas imágenes son y lo que cuestan.',
+      h('button', { clase: 'mini peligro', onclick: rehacerTodasLasImagenes },
+        'Rehacer todas')) : null,
     /* LA PASTILLA SOLO SI ESTE BOTON TIENE ALGO QUE HACER.
        Miraba el estado de los pasos y el boton mira el PLAN, y no son lo
        mismo: regenerar las capas deja el MP4 viejo --y eso es verdad-- pero la
@@ -11558,4 +11569,104 @@ function vistaPublicacionLight() {
       h('button', { clase: 'mini', onclick: () => copiarTexto((d.tags || []).join(', '), 'tags') },
         'Copiar tags'))));
   return caja;
+}
+
+
+/* ============================================== QUIÉN DIBUJA LAS IMÁGENES
+ *
+ * «Generar con» es un ajuste del Estudio (`motor_imagen` en /api/ajustes), no
+ * del vídeo: no entra en ninguna firma, así que cambiarlo no deja obsoleta
+ * ninguna imagen ya pagada. Lo leen la tanda de imágenes y «Rehacer todas».
+ */
+const MOTOR_GEN = { valor: null, pidiendo: false };
+
+const MOTORES_GENERAR = [
+  { valor: 'openai', nombre: 'OpenAI' },
+  { valor: 'kie:nano-banana-2', nombre: 'Kie · Nano Banana 2' },
+  { valor: 'kie:nano-banana-pro', nombre: 'Kie · Nano Banana Pro' },
+];
+
+async function cargarMotorGenerar() {
+  if (MOTOR_GEN.valor !== null || MOTOR_GEN.pidiendo) return;
+  MOTOR_GEN.pidiendo = true;
+  try {
+    const datos = await pedir(API.ajustes());
+    MOTOR_GEN.valor = ((datos || {}).ajustes || {}).motor_imagen || 'openai';
+    refrescarVivosLight();
+    pintarLight();
+  } catch (e) { MOTOR_GEN.valor = 'openai'; }
+  MOTOR_GEN.pidiendo = false;
+}
+
+function selectorMotorGenerar(corriendo) {
+  cargarMotorGenerar();
+  const sel = h('select', {
+    clase: 'motor-generar', disabled: corriendo,
+    title: 'Con qué motor se dibujan los planos y las hojas de personaje',
+    onchange: async ev => {
+      const valor = ev.target.value;
+      try {
+        await pedir(API.ajustes(), { method: 'PUT', cuerpo: { motor_imagen: valor } });
+        MOTOR_GEN.valor = valor;
+        toast(`las imágenes se dibujarán con ${nombreMotor(valor)}`);
+      } catch (err) { toast(err.message, true); ev.target.value = MOTOR_GEN.valor || 'openai'; }
+    },
+  }, ...MOTORES_GENERAR.map(m => h('option', { value: m.valor }, m.nombre)));
+  sel.value = MOTOR_GEN.valor || 'openai';
+  return conAyuda('Con qué motor se dibujan los planos y las hojas de personaje. '
+    + 'Cambiarlo no toca las imágenes que ya hay.', sel);
+}
+
+function nombreMotor(valor) {
+  const m = MOTORES_GENERAR.find(x => x.valor === valor);
+  return m ? m.nombre : valor;
+}
+
+/* REHACER TODAS LAS IMÁGENES, con el aviso delante. Cuesta lo que una tanda
+   entera, así que antes de nada se pregunta al servidor cuántas son y lo que
+   cuestan, y se dice en el aviso. Se dibujan DESDE CERO: sin la imagen vieja
+   delante, para que el motor nuevo no copie al anterior. */
+async function rehacerTodasLasImagenes() {
+  const v = APP.light.video;
+  if (!v.pid) return;
+  const motor = MOTOR_GEN.valor || 'openai';
+  let previsto;
+  try {
+    previsto = await pedir(`${API.proyecto(v.pid)}/imagenes/rehacer?motor=${encodeURIComponent(motor)}`);
+  } catch (err) { mostrarError(CLAVE_VIDEO_LIGHT, err); return; }
+  const coste = previsto.usd_estimado !== null && previsto.usd_estimado !== undefined
+    ? `unos ${previsto.usd_estimado.toFixed(2)} $ (calidad ${previsto.calidad})`
+    : 'lo que marque la tarifa de Kie en créditos';
+  const aviso = `¿Seguro que quieres REHACER TODAS LAS IMÁGENES?\n\n`
+    + `Se vuelven a dibujar desde cero con ${nombreMotor(motor)}:\n`
+    + `  · ${previsto.planos} planos\n`
+    + `  · ${previsto.hojas} hojas de personaje\n\n`
+    + `Coste aproximado: ${coste}.\n\n`
+    + 'Las imágenes de ahora se sustituyen (la versión anterior queda en el '
+    + 'historial). El corte, el guion y el audio no se tocan; el vídeo habrá '
+    + 'que volver a montarlo.';
+  if (!window.confirm(aviso)) return;
+  limpiarError(CLAVE_VIDEO_LIGHT);
+  try {
+    const datos = await pedir(API.ejecutar(v.pid, 'assets'), {
+      method: 'POST',
+      cuerpo: { todo: true, rehacer: true, replantear: false, motor_generar: motor },
+    });
+    const tid = datos.trabajo_id || (datos.trabajo || {}).id;
+    if (!tid) throw new Error('el servidor no ha devuelto ningún trabajo');
+    v.planDe = tid;
+    v.planos = [];
+    seguirTrabajo(CLAVE_VIDEO_LIGHT, tid, async trabajo => {
+      if (trabajo.estado === 'listo') {
+        await cargarVideoLight(v.pid);
+        PREVIA.ficha = null;
+        v.vista = 'previa';
+      }
+      pintarLight();
+    }, () => { refrescarPlanosLight(); refrescarVivosLight(); });
+    pintarLight();
+  } catch (err) {
+    mostrarError(CLAVE_VIDEO_LIGHT, err);
+    pintarLight();
+  }
 }

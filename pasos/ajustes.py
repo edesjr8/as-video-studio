@@ -30,6 +30,7 @@ multiplicar por 6,8 y multiplica por 1,7, porque la parte que se multiplica es
 la pequena. Sin esta cuenta delante, la pantalla asustaria con un numero falso.
 """
 import os
+import re
 
 try:
     from nucleo import coste as COSTE
@@ -47,6 +48,20 @@ RUTA = os.environ.get("ESTUDIO_AJUSTES") or os.path.join(RAIZ_ESTUDIO,
 
 #: Las calidades que acepta el motor de imagen, de mas barata a mas cara.
 CALIDADES = ("low", "medium", "high")
+
+#: QUIEN DIBUJA LOS PLANOS Y LAS HOJAS DE PERSONAJE: el selector «Generar con»
+#: de la pantalla. Vacio es «lo de siempre»: la variable IMAGEN_GENERAR del
+#: servidor, y sin ella OpenAI. No entra en ninguna firma: cambiar de motor no
+#: deja obsoleta ninguna imagen ya pagada.
+MOTORES_IMAGEN = ("openai", "kie:nano-banana-2", "kie:nano-banana-pro")
+
+
+def motor_valido(valor):
+    """'' | 'openai' | 'kie:<modelo>'. Lanza ValueError con lo demas."""
+    valor = str(valor or "").strip()
+    if valor and valor != "openai" and not re.fullmatch(r"kie:[\w./-]+", valor):
+        raise ValueError(f"motor de imagen {valor!r}: 'openai' o 'kie:<modelo>'")
+    return valor
 
 #: El tamano con el que se generan los planos, y por tanto con el que hay que
 #: mirar la tabla de precios. Es el de `p6_assets` para 16:9.
@@ -67,6 +82,7 @@ POR_DEFECTO = {
     # porque es de la instalacion, no de la pantalla: desde el movil no hay
     # que volver a verla.
     "onboarding_visto": False,
+    "motor_imagen": "",
 }
 
 
@@ -80,6 +96,10 @@ def leer():
     if salida.get("calidad_imagen") not in CALIDADES:
         salida["calidad_imagen"] = POR_DEFECTO["calidad_imagen"]
     salida["onboarding_visto"] = bool(salida.get("onboarding_visto"))
+    try:
+        salida["motor_imagen"] = motor_valido(salida.get("motor_imagen"))
+    except ValueError:
+        salida["motor_imagen"] = ""
     return salida
 
 
@@ -100,6 +120,8 @@ def guardar(cambios):
                 f"calidad {valor!r}: solo {', '.join(CALIDADES)}")
         if clave == "onboarding_visto" and not isinstance(valor, bool):
             raise ValueError("onboarding_visto es verdadero o falso")
+        if clave == "motor_imagen":
+            valor = motor_valido(valor)
         actual[clave] = valor
     escribir_json(RUTA, actual)
     return actual

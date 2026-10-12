@@ -1755,6 +1755,32 @@ def probar_onboarding(cliente):
        "se queda marcada y la calidad sigue en su sitio")
 
 
+def probar_motor_de_generar(cliente, pid):
+    """«Generar con»: un ajuste del Estudio, validado, y el previsto de rehacer."""
+    seccion("QUIEN DIBUJA LAS IMAGENES")
+    respuesta, ficha = cliente.get("/api/ajustes")
+    igual(ficha["ajustes"].get("motor_imagen"), "",
+          "de fabrica no hay motor elegido: manda el servidor")
+    respuesta, ficha = cliente.put("/api/ajustes", {"motor_imagen": "kie:nano-banana-pro"})
+    igual(respuesta.status_code, 200, "se elige Kie")
+    igual(ficha["ajustes"].get("motor_imagen"), "kie:nano-banana-pro", "y se guarda")
+    respuesta, _ = cliente.put("/api/ajustes", {"motor_imagen": "midjourney"})
+    igual(respuesta.status_code, 400, "un motor que no existe da 400")
+    respuesta, previsto = cliente.get(f"/api/proyectos/{pid}/imagenes/rehacer")
+    igual(respuesta.status_code, 200, "el previsto de rehacer responde")
+    igual(previsto.get("motor"), "kie:nano-banana-pro",
+          "y dice el motor elegido en el selector")
+    ok(previsto.get("usd_estimado") is None, "con Kie no inventa un importe")
+    respuesta, previsto = cliente.get(f"/api/proyectos/{pid}/imagenes/rehacer?motor=openai")
+    ok(isinstance(previsto.get("usd_estimado"), (int, float))
+       and previsto.get("total") == previsto.get("planos") + previsto.get("hojas"),
+       f"con OpenAI cuenta planos y hojas y pone precio: {previsto}")
+    respuesta, _ = cliente.post(f"/api/proyectos/{pid}/pasos/assets/ejecutar",
+                                {"motor_generar": "midjourney"})
+    igual(respuesta.status_code, 400, "ejecutar con un motor que no existe da 400")
+    cliente.put("/api/ajustes", {"motor_imagen": ""})
+
+
 def probar_salud_de_las_cuentas(cliente):
     """La salud de las cuentas de Claude y la prueba de las claves, por la API.
 
@@ -3435,6 +3461,7 @@ def main():
         probar_asistente(cliente)
         probar_la_foto_del_asistente(cliente, pid)
         probar_onboarding(cliente)
+        probar_motor_de_generar(cliente, pid)
         probar_salud_de_las_cuentas(cliente)
         probar_recetas(cliente, pid)
         probar_lo_que_se_cuenta_en_publico()

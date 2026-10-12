@@ -174,6 +174,12 @@ Reglas que valen para toda la API y no se repiten en cada fila:
 | `GET` | `/api/proyectos/{pid}/montaje/notas` | Lo escrito sobre el vídeo terminado. No toca ninguna firma. |
 | `PUT` | `/api/proyectos/{pid}/montaje/notas` | Guarda la nota del vídeo entero. Autoguardado, como todo lo demás. |
 
+## Rehacer todas las imágenes
+
+| | Ruta | Qué hace |
+|---|---|---|
+| `GET` | `/api/proyectos/{pid}/imagenes/rehacer` | Cuántos planos y hojas de personaje se volverían a dibujar, con qué motor y cuánto costaría, ANTES de pulsar. Se rehace con `POST .../pasos/assets/ejecutar` y `{todo, rehacer, motor_generar}`. |
+
 ## Publicación: miniaturas, títulos y descripción
 
 No es un paso del grafo: nada de esto entra en una firma (`pasos/publicacion.py`).

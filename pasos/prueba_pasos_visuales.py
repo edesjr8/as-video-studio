@@ -1110,6 +1110,7 @@ def probar_render(proyecto, estado, params):
     probar_rehacer_uno_rehace_uno(proyecto, estado, params)
     probar_plano_que_falla_no_tumba_la_tanda(proyecto, estado)
     probar_corregir_solo_con_mi_texto(proyecto, estado)
+    probar_rehacer_todas_desde_cero(proyecto, estado)
     return resultado
 
 
@@ -1351,6 +1352,48 @@ def probar_corregir_solo_con_mi_texto(proyecto, estado):
            "con OpenAI va el prompt completo con la nota dentro")
         ok(not abierto.get("solo_prompt") and abierto.get("proveedor") == "openai",
            "y se pide a OpenAI")
+    finally:
+        p6_assets._producir_imagen = original
+
+
+def probar_rehacer_todas_desde_cero(proyecto, estado):
+    """«Rehacer todas» dibuja DESDE CERO con el motor elegido.
+
+    Rehacer un plano pedido por su nombre es una correccion: la imagen actual
+    va delante y se pide conservarla. Pero rehacer TODAS con otro motor es lo
+    contrario: si la imagen vieja fuera delante, el motor nuevo copiaria el
+    estilo del anterior, que es justo lo que se quiere dejar atras.
+    """
+    print("\n  [rehacer todas las imagenes: desde cero y con el motor elegido]")
+    params = dict(estado.params("assets"), corrector="no")
+    original = p6_assets._producir_imagen
+    vistas = []
+
+    def mira(nombre, prompt, referencias, destino, p, **kwargs):
+        vistas.append({"nombre": nombre, "destino": destino, **kwargs})
+        return original(nombre, prompt, referencias, destino, p, **kwargs)
+
+    p6_assets._producir_imagen = mira
+    try:
+        p6_assets.ejecutar(proyecto, params, avisador("p6"), rehacer=True,
+                           motor_generar="openai")
+        planos = [v for v in vistas if os.sep + "escenas" + os.sep in v["destino"]]
+        hojas = [v for v in vistas if os.sep + "reparto" + os.sep in v["destino"]]
+        ok(planos and hojas, f"se rehacen planos ({len(planos)}) y hojas ({len(hojas)})")
+        ok(all(v.get("rehacer") and v.get("corregir") is False for v in planos + hojas),
+           "todas sin cache y SIN la imagen vieja delante")
+        ok(all(v.get("proveedor") == "openai" for v in planos + hojas),
+           "y todas con el motor elegido")
+
+        vistas.clear()
+        plan = p6_assets.plan_actual(proyecto)
+        sid = next(e["id"] for e in plan["escenas"]
+                   if not (e.get("sigue_a") or e.get("componente")
+                           or p6_assets.cartelas.sin_imagen(e)))
+        p6_assets.ejecutar(proyecto, params, avisador("p6"),
+                           unidades=[f"escena:{sid}"], rehacer=True)
+        ok(vistas and vistas[-1].get("corregir") is True,
+           "rehacer UN plano pedido sigue siendo una correccion")
     finally:
         p6_assets._producir_imagen = original
 

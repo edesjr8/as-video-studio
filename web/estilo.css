@@ -2447,3 +2447,6 @@ button.avisa:hover:not(:disabled) { border-color: var(--aviso); }
 .pub-capitulos { display: flex; flex-direction: column; gap: 2px; width: 100%; }
 .pub-vivo { width: 100%; }
 @media (max-width: 600px) { .pub-rejilla { grid-template-columns: 1fr; } }
+
+/* el selector «Generar con» del pie del guion */
+.motor-generar { max-width: 190px; }

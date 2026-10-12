@@ -2933,7 +2933,8 @@ def _adoptar(nombre, p, firma=None, subcarpetas=("", "escenas", "storyboard", "r
 
 
 def _producir_imagen(nombre, prompt, referencias, destino, p, rehacer=False,
-                     tamano=None, proveedor=None, solo_prompt=False):
+                     tamano=None, proveedor=None, solo_prompt=False,
+                     corregir=None):
     """Arte adoptado -> cache -> API. Devuelve como se resolvio y el coste.
 
     'rehacer' es el boton de "esta no me gusta": salta el arte adoptado y la
@@ -2977,7 +2978,13 @@ def _producir_imagen(nombre, prompt, referencias, destino, p, rehacer=False,
     try:
         # AÑADIDO: si el humano pidio rehacerla, es una CORRECCION (puede ir a
         # otro proveedor/modelo con IMAGEN_CORREGIR) y se pasa la imagen actual
-        corrige = bool(rehacer and os.path.exists(destino))
+        #
+        # `corregir=False` es «rehacer DESDE CERO»: el boton de rehacer todas
+        # las imagenes con otro motor. Como correccion se mandaria la imagen
+        # vieja delante pidiendo «conservala igual», y el motor nuevo copiaria
+        # el estilo del anterior.
+        corrige = bool((rehacer if corregir is None else corregir)
+                       and os.path.exists(destino))
         envoltorio = getattr(imagen, "contexto", None)
         if envoltorio is not None:
             with envoltorio(corregir=corrige, actual=destino if corrige else None,
@@ -3170,7 +3177,7 @@ def _recolocar_escenas(carpeta, escenas):
 
 def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                      forzar=False, notas_repaso=None, proyecto=None,
-                     fallidos=None, motor_correccion=None):
+                     fallidos=None, motor_correccion=None, motor_generar=None):
     """Genera los planos y devuelve el coste. En fila o en cadenas paralelas.
 
     `fallidos` recoge {uid: motivo} de los planos que no han salido. Un plano
@@ -3382,10 +3389,14 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                     # ni el prompt del plano, ni el corrector, ni las laminas.
                     # Van la imagen actual (para editarla) y lo que el adjunto
                     # a la nota. Solo al rehacer un plano que ya existe.
+                    rehaciendo = bool(pedida and forzar and os.path.exists(destino))
+                    # CORREGIR ES REHACER UNO QUE SE HA PEDIDO POR SU NOMBRE. Sin
+                    # unidades es «rehacer todas»: se dibuja desde cero, con el
+                    # motor de generar y sin la imagen vieja delante.
+                    corrige_plano = rehaciendo and unidades is not None
                     solo_texto = bool(
                         str(motor_correccion or "").startswith("kie")
-                        and nota_texto and pedida and forzar
-                        and os.path.exists(destino))
+                        and nota_texto and corrige_plano)
                     # EL CORRECTOR, solo cuando hay nota y alguien ha pedido rehacer
                     # ESTE plano: es una llamada al CLI por imagen, y una tanda
                     # entera de planos sucios no la merece. Con nota y a mano si:
@@ -3440,15 +3451,16 @@ def _generar_escenas(plan, dirs, p, trabajo, toca, unidades, resultados, avisar,
                                             # saltarse la cache: con el mismo
                                             # prompt devolveria la que se acaba de
                                             # rechazar
-                                            rehacer=(pedida and forzar
-                                                     and os.path.exists(destino)),
+                                            rehacer=rehaciendo,
+                                            corregir=corrige_plano,
                                             # al tamano del formato del video: un
                                             # plano vertical se PIDE vertical, no
                                             # se recorta de uno apaisado
                                             tamano=p2_brief.comun.ficha_formato(
                                                 plan.get("formato"))["tamano_imagen"],
                                             # el selector de la pantalla, si lo hay
-                                            proveedor=motor_correccion or None,
+                                            proveedor=(motor_correccion if corrige_plano
+                                                       else motor_generar) or None,
                                             solo_prompt=solo_texto)
                     if corregido:
                         meta = dict(meta, corrector={
@@ -4264,7 +4276,16 @@ MOTOR_CAMBIOS = {
 }
 
 OPCIONES_EJECUCION = ("solo_assets", "replantear", "rehacer", "tipos",
-                      "motor_correccion")
+                      "motor_correccion", "motor_generar")
+
+
+def motor_de_los_ajustes():
+    """El motor del selector «Generar con», o None para el de siempre."""
+    try:
+        import ajustes as ajustes_estudio                # noqa: PLC0415
+        return ajustes_estudio.leer().get("motor_imagen") or None
+    except Exception:                                    # noqa: BLE001
+        return None
 
 
 def _anotar_tiempo(paso, arranque, hechas, detalle=None, proyecto=None):
@@ -4300,7 +4321,7 @@ def _anotar_tiempo(paso, arranque, hechas, detalle=None, proyecto=None):
 
 def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
              replantear=False, rehacer=False, tipos=None, previo=None,
-             motor_correccion=None):
+             motor_correccion=None, motor_generar=None):
     """Construye assets y escenas. Si unidades no es None, solo esas.
 
     Con solo_assets se para despues de los assets (sets, reparto, mapas y
@@ -4325,6 +4346,8 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
     """
     arranque_paso = time.time()
     p = _con_defectos(params)
+    if not motor_generar:
+        motor_generar = motor_de_los_ajustes()
     avisar = estadisticas.avisador(avisar)
     tipos = {str(t) for t in (tipos or [])} or None
     if tipos:
@@ -4405,9 +4428,13 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
                 # cara y los cuerpos, que es lo que esa hoja tiene que fijar
                 refs = [r["ruta"] for r in _referencias_estilo(
                     p, dirs["cache"], {"personajes": [ficha["nombre"]]})]
+                # pedida por su nombre es una correccion; «rehacer todas» la
+                # dibuja desde cero con el motor de generar
                 meta = _producir_imagen(ficha["nombre"], prompt, refs, destino, p,
                                         rehacer=((rehacer or unidades is not None)
-                                                 and os.path.exists(destino)))
+                                                 and os.path.exists(destino)),
+                                        corregir=unidades is not None,
+                                        proveedor=motor_generar)
                 resultados[uid] = {"tipo": "reparto",
                                    "png": os.path.relpath(destino, trabajo), **meta}
             else:
@@ -4482,7 +4509,8 @@ def ejecutar(proyecto, params, avisar=None, unidades=None, solo_assets=False,
                              resultados, avisar, forzar=rehacer,
                              notas_repaso=_notas_del_repaso(proyecto),
                              proyecto=proyecto, fallidos=fallidos,
-                             motor_correccion=motor_correccion)
+                             motor_correccion=motor_correccion,
+                             motor_generar=motor_generar)
     if fallidos:
         # SE PUBLICA LO QUE HA SALIDO. Los planos que fallaron se quedan sin
         # imagen nueva y la version dice cuales son (`planos_fallidos`); la
