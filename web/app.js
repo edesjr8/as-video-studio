@@ -5712,8 +5712,14 @@ async function reengancharTandaLight(pid) {
   try {
     const datos = await pedir(`${API.trabajosVivos()}?proyecto=`
       + `${encodeURIComponent(pid)}&activos=1`);
-    const vivo = (datos.trabajos || []).find(
-      t => String(t.nombre || '').startsWith('generar:'));
+    /* LA TANDA O «REHACER TODAS». El segundo es una pasada ENTERA de `assets`
+       (sin unidades: las que llevan unidades son regeneraciones de planos
+       sueltos, y esas las retoma su tarjeta). Solo se buscaba la tanda, y al
+       recargar a media pasada de «Rehacer todas» el trabajo seguía dibujando
+       en el servidor sin barra ni señal ninguna en la pantalla. */
+    const vivos = datos.trabajos || [];
+    const vivo = vivos.find(t => String(t.nombre || '').startsWith('generar:'))
+      || vivos.find(t => t.paso === 'assets' && !(t.unidades || []).length);
     if (!vivo) { await contarLaTandaQueMurio(pid); return; }
     /* DE QUE TANDA ES EL TRABAJO QUE YA VENIA CORRIENDO.
      *
@@ -5730,7 +5736,9 @@ async function reengancharTandaLight(pid) {
      * El orden importa: 'render' se mira ANTES que 'video' porque su nombre
      * lleva las dos pestañas dentro. */
     const nombre = String(vivo.nombre);
-    const tanda = nombre.includes('render') ? 'render'
+    const rehaciendo = !nombre.startsWith('generar:');
+    const tanda = rehaciendo ? 'video'
+      : nombre.includes('render') ? 'render'
       : (nombre.includes('video') ? 'video'
         : (nombre.includes('voz') ? 'voz' : 'guion'));
     // la tanda de las imágenes acaba en el previsualizador; la del MP4, en el vídeo
@@ -5739,11 +5747,18 @@ async function reengancharTandaLight(pid) {
     // EL PREVISTO, TAMBIÉN AL REENGANCHAR. Sin esto, volver a la pantalla con
     // la tanda ya corriendo —que es el caso normal cuando se mira desde el
     // móvil— dejaba la barra sin cuenta atrás hasta que terminase.
-    try {
-      APP.light.video.plan = (await pedir(
-        `${API.proyecto(pid)}/generar?tanda=${tanda}`)) || null;
-      APP.light.video.planDe = vivo.id;
-    } catch (e) { /* sin previsto se pinta sin cuenta atrás */ }
+    //
+    // «Rehacer todas» no tiene previsto de tanda: el de la tanda de imágenes
+    // diría «no queda nada», que es justo lo que se está rehaciendo.
+    if (!rehaciendo) {
+      try {
+        APP.light.video.plan = (await pedir(
+          `${API.proyecto(pid)}/generar?tanda=${tanda}`)) || null;
+        APP.light.video.planDe = vivo.id;
+      } catch (e) { /* sin previsto se pinta sin cuenta atrás */ }
+    }
+    APP.trabajos[CLAVE_VIDEO_LIGHT] = Object.assign({}, vivo,
+      { inicio: Date.now() - (vivo.segundos || 0) * 1000 });
     seguirTrabajo(CLAVE_VIDEO_LIGHT, vivo.id, async trabajo => {
       if (trabajo.estado === 'listo') await cargarVideoLight(pid);
       pintarLight();
