@@ -13,6 +13,7 @@ Espera un JSON con una lista "escenas", cada una con "id" y "narracion".
 Escribe <out>/<id>.wav y <out>/audio_meta.json.
 """
 import argparse
+import array
 import base64
 import json
 import os
@@ -207,6 +208,65 @@ def _pcm_de_wav(wav: bytes) -> bytes:
 FUNDIDO_MS = 12
 
 
+#: Lo que se deja fuera de la pausa al buscar ruido de sala. La marca de una
+#: palabra no es donde empieza a sonar: la cola de la que acaba («llorando»)
+#: sigue un poco despues de su `e`, y la consonante y la respiracion de la que
+#: empieza («De») arrancan ANTES de su `s`. El ataque se come mas margen.
+MARGEN_FIN_S = 0.08
+MARGEN_INICIO_S = 0.15
+
+#: Largo del trozo de ruido de sala que se repite.
+VENTANA_SALA_S = 0.06
+
+#: Techo de volumen (RMS, en muestras de 16 bits) del relleno: unos -49 dBFS,
+#: el suelo de ruido de una toma limpia. Si el trozo mas callado trae algo mas
+#: fuerte -- un resto de voz en una pausa muy corta --, se baja hasta aqui en
+#: vez de repetirlo tal cual.
+TECHO_SALA = 120
+
+
+def _semilla_de_sala(pcm, desde_seg, hasta_seg):
+    """El tramo MAS CALLADO de la pausa, lejos de las dos palabras. -> bytes
+
+    Antes se cogian 200 ms del CENTRO de la pausa. Las pausas naturales de
+    Cartesia rondan los 0,4 s, asi que esos 200 ms llegaban hasta el final de
+    una palabra y el arranque de la siguiente, y al repetirse en bucle se oia:
+    «Y aqui estaba llorando. De repente» salia «llorando P D D de repente». Era
+    el ataque de la «D» --y la respiracion de antes-- repetido tres veces.
+    """
+    bytes_por_seg = SR * 2
+    for margen_fin, margen_ini, techo in ((MARGEN_FIN_S, MARGEN_INICIO_S, TECHO_SALA),
+                                          (0.0, 0.0, TECHO_SALA / 3)):
+        # la segunda vuelta es para una pausa tan corta que con margenes no
+        # queda nada: se busca en toda ella y se baja mas el volumen
+        ini = int((desde_seg + margen_fin) * bytes_por_seg) & ~1
+        fin = int((hasta_seg - margen_ini) * bytes_por_seg) & ~1
+        ini, fin = max(0, ini), min(len(pcm) & ~1, fin)
+        if fin - ini < int(0.02 * bytes_por_seg):
+            continue
+        muestras = array.array("h")
+        muestras.frombytes(pcm[ini:fin])
+        if sys.byteorder != "little":
+            muestras.byteswap()
+        ventana = min(int(VENTANA_SALA_S * SR), len(muestras))
+        # sumas acumuladas de cuadrados: la energia de cada ventana en O(1)
+        acumulada = [0]
+        for valor in muestras:
+            acumulada.append(acumulada[-1] + valor * valor)
+        paso = max(1, ventana // 4)
+        mejor = min(range(0, len(muestras) - ventana + 1, paso),
+                    key=lambda i: acumulada[i + ventana] - acumulada[i])
+        semilla = muestras[mejor:mejor + ventana]
+        rms = ((acumulada[mejor + ventana] - acumulada[mejor]) / ventana) ** 0.5
+        if rms > techo:
+            factor = techo / rms
+            semilla = array.array("h", (int(v * factor) for v in semilla))
+        if sys.byteorder != "little":
+            semilla.byteswap()
+        return semilla.tobytes()
+    return b""
+
+
 def _relleno_de_sala(pcm, desde_seg, hasta_seg, duracion):
     """Ruido de sala para rellenar un hueco, sacado de la PROPIA pausa.
 
@@ -216,24 +276,17 @@ def _relleno_de_sala(pcm, desde_seg, hasta_seg, duracion):
     vacio digital en un video de 15 minutos, uno en cada frontera de bloque.
 
     La mejor muestra de ruido de sala es la de la pausa que se esta ensanchando,
-    asi que se toma de ahi y se repite. Se alterna con su reverso para que la
-    repeticion no cree un patron audible.
+    asi que se toma de ahi (su tramo mas callado, ver _semilla_de_sala) y se
+    repite. Se alterna con su reverso para que la repeticion no cree un patron
+    audible.
     """
     bytes_por_seg = SR * 2
     necesarios = int(duracion * bytes_por_seg) & ~1
     if necesarios <= 0:
         return b""
-    # semilla: el centro de la pausa natural, hasta 200 ms
-    ancho = max(0.0, hasta_seg - desde_seg)
-    if ancho < 0.04:
-        return b"\x00" * necesarios          # no hay pausa de la que sacar nada
-    toma = min(0.2, ancho * 0.8)
-    centro = (desde_seg + hasta_seg) / 2.0
-    ini = int((centro - toma / 2) * bytes_por_seg) & ~1
-    fin = (ini + (int(toma * bytes_por_seg) & ~1))
-    semilla = pcm[max(0, ini):min(len(pcm), fin)]
+    semilla = _semilla_de_sala(pcm, desde_seg, hasta_seg)
     if len(semilla) < 4:
-        return b"\x00" * necesarios
+        return b"\x00" * necesarios          # no hay pausa de la que sacar nada
 
     reverso = semilla[::-1]
     # el reverso de un buffer de bytes invierte tambien los dos bytes de cada

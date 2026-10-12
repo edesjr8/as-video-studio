@@ -1410,6 +1410,31 @@ def prueba_espaciar():
     igual(voz.espaciar(wav, palabras, sin_falta, escenas, 1.0)[1], [],
           "si la pausa ya es mayor que el minimo no se toca nada")
 
+    # EL ATAQUE DE LA PALABRA SIGUIENTE NO SE REPITE. La consonante y la
+    # respiracion arrancan ANTES de la marca `s` de la palabra; el relleno
+    # cogia los 200 ms del centro de la pausa, se llevaba ese ataque y lo
+    # repetia en bucle: «llorando. De repente» sonaba «llorando P D D de
+    # repente». Aqui la pausa va de 1,0 a 1,4 y el ataque empieza en 1,25.
+    muestras = []
+    for i in range(total):
+        t = i / float(sr)
+        if t < 1.0 or t >= 1.4:
+            muestras.append(9000 if i % 3 else -9000)    # voz
+        elif t >= 1.25:
+            muestras.append(5000 if i % 4 < 2 else -5000)  # ataque de la «D»
+        else:
+            muestras.append(60 if i % 2 else -60)        # ruido de sala
+    wav = _wav(muestras)
+    reparto = {"B01": [{"s": 0.0, "e": 1.0}], "B02": [{"s": 1.4, "e": 4.0}]}
+    nuevo, desplazamientos = voz.espaciar(wav, palabras, reparto, escenas, 1.0)
+    pcm = voz._pcm_de_wav(nuevo)
+    desde = int(desplazamientos[0]["desde"] * sr) * 2
+    hasta = desde + int(desplazamientos[0]["retardo"] * sr) * 2
+    relleno = [struct.unpack("<h", pcm[i:i + 2])[0] for i in range(desde, hasta, 2)]
+    ok(max(abs(v) for v in relleno) <= voz.TECHO_SALA * 2,
+       f"el relleno no repite el ataque de la palabra siguiente (pico "
+       f"{max(abs(v) for v in relleno)})")
+
 
 # --------------------------------------------------- 6. p6._capa_vectorial
 
