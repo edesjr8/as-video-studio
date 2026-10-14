@@ -2454,3 +2454,5 @@ button.avisa:hover:not(:disabled) { border-color: var(--aviso); }
 /* la marca de una imagen recien hecha en una tanda en marcha */
 .previa-nueva { position: absolute; top: 10px; left: 10px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--ok); color: var(--sobre-acento); }
 .previa-nueva.pendiente { background: var(--boton); color: var(--tenue); font-weight: 500; }
+.previa-sin-imagen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--tenue); text-align: center; padding: 16px; }
+.previa-sin-imagen b { color: var(--texto); font-size: 16px; }

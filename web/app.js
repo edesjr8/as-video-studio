@@ -7856,6 +7856,16 @@ function vistaPreviaLight() {
   }
   /* LA QUE ACABA DE SALIR DE UNA TANDA EN MARCHA. Se enseña en cuanto existe,
      pero todavía no es la del vídeo: se publica cuando termina la tanda. */
+  /* SIN IMAGEN SE DICE. Un marco negro sin más se leía como «la imagen no
+     carga», y era que ese plano no se había dibujado nunca: el vídeo tenía el
+     corte y la voz --se podía recorrer y oír-- y ni un solo plano generado. */
+  if (!fondo && !e.cartela) {
+    marco.appendChild(h('div', { clase: 'previa-sin-imagen' },
+      h('b', {}, 'Este plano aún no tiene imagen'),
+      h('span', {}, corriendoImagenesLight()
+        ? 'se está generando: aparecerá aquí en cuanto esté'
+        : 'pulsa «Generar imágenes» en la pantalla del guion')));
+  }
   if (e.nueva) {
     marco.appendChild(h('span', { clase: 'previa-nueva' },
       '✓ nueva · se publica al terminar la tanda'));
