@@ -4239,6 +4239,40 @@ def _ruta_de_version(ctx, paso, *partes):
     return "/".join(["pasos", paso, f"v{int(version)}"] + list(partes))
 
 
+def _imagen_de_plano(ctx, sid, version_activa, trabajo):
+    """La imagen que se ENSEÑA de un plano. -> {imagen, sello?, nueva?}
+
+    La de la version activa, salvo que en la carpeta de trabajo haya una MAS
+    NUEVA: eso es una tanda en marcha (o cortada) que ya ha dibujado ese plano.
+    Sin esto la pantalla de Imagenes no ensenaba nada de lo que se iba
+    generando hasta que terminaba la tanda entera --una hora con «Rehacer
+    todas»-- y no habia forma de saber si se estaba haciendo algo. Va marcada
+    como `nueva`: todavia no esta publicada, se publica al terminar.
+    """
+    activa = _ruta_de_version(ctx, "assets", "escenas", f"{sid}.png")
+    salida = {"imagen": activa}
+    if not trabajo:
+        return salida
+    nueva = os.path.join(trabajo, "escenas", f"{sid}.png")
+    try:
+        sello_nueva = os.path.getmtime(nueva)
+    except OSError:
+        return salida
+    sello_activa = 0.0
+    if activa and version_activa:
+        try:
+            sello_activa = os.path.getmtime(os.path.join(
+                ctx.proyecto.ruta_paso("assets", version_activa), "escenas", f"{sid}.png"))
+        except OSError:
+            pass
+    # mas nueva de verdad: sembrar el trabajo COPIA la activa con su fecha
+    # (copy2), y esa copia no es un dibujo nuevo
+    if sello_nueva > sello_activa + 1:
+        salida = {"imagen": os.path.relpath(nueva, ctx.proyecto.raiz).replace(os.sep, "/"),
+                  "sello": int(sello_nueva), "nueva": True}
+    return salida
+
+
 def _ficha_de_escena(ctx, sid):
     """La ficha del dibujo de un plano: para QUE texto se dibujo, y su ruta."""
     version = ctx.proyecto.version_activa("assets")
@@ -4380,6 +4414,10 @@ def leer_previsualizacion(pid: str):
     # lo mismo, y uno de los dos viejo.
     params_callouts = ctx.estado.params("callouts") or {}
     medir, banda = _medidor_de_subtitulo(ctx, plan)
+    version_assets = ctx.proyecto.version_activa("assets")
+    trabajo_assets = ctx.proyecto.ruta_trabajo("assets", crear=False)
+    if not os.path.isdir(trabajo_assets):
+        trabajo_assets = None
     escenas = []
     for escena in escenas_plan:
         sid = str(escena.get("id") or "")
@@ -4415,7 +4453,7 @@ def leer_previsualizacion(pid: str):
             "narracion": escena.get("narracion") or "",
             "bloque": (escena.get("origen") or {}).get("bloque") or "",
             "cartela": (escena.get("cartela") or {}).get("plantilla") or "",
-            "imagen": _ruta_de_version(ctx, "assets", "escenas", f"{sid}.png"),
+            **_imagen_de_plano(ctx, sid, version_assets, trabajo_assets),
             # y si el dibujo que hay ya no es de lo que aqui se dice. Va vacio
             # cuando esta al dia: es una excepcion, no un campo de todos.
             **_obsolescencia(ctx, escena),

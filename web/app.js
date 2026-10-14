@@ -1031,6 +1031,13 @@ function leerAvance(crudo) {
 function avancePublico(trabajo) {
   const ficha = trabajo || {};
   const texto = String(ficha.publico || '').trim();
+  /* UN PASO LANZADO SUELTO --«Rehacer todas»-- manda la cuenta en bruto, la
+     tupla de Python «(104, 173)»: las tandas la traducen en el servidor y esto
+     no pasa por ahí. Se dice en cristiano. */
+  const cuenta = texto.match(/^\((\d+),\s*(\d+)\)$/);
+  if (cuenta) {
+    return `${cuenta[1]} de ${cuenta[2]}` + (ficha.paso === 'assets' ? ' imágenes' : '');
+  }
   if (texto) return texto;
   return ['pendiente', 'ejecutando'].includes(ficha.estado) ? 'Trabajando…' : '';
 }
@@ -5763,7 +5770,7 @@ async function reengancharTandaLight(pid) {
       if (trabajo.estado === 'listo') await cargarVideoLight(pid);
       pintarLight();
     }, () => {
-      if (tanda === 'video') refrescarPlanosLight();
+      if (tanda === 'video') { refrescarPlanosLight(); refrescarImagenesEnMarcha(); }
       refrescarVivosLight();
     });
   } catch (e) { /* no poder mirar los trabajos no puede tumbar la pantalla */ }
@@ -6484,7 +6491,7 @@ async function lanzarTandaLight(tanda, modo) {
       // LA PANTALLA: en un tic solo cambia el progreso, y repintarlo todo
       // doscientas veces es lo que hacía parpadear los textos y comerse las
       // teclas (ver `refrescarVivosLight`).
-      if (tanda === 'video') refrescarPlanosLight();
+      if (tanda === 'video') { refrescarPlanosLight(); refrescarImagenesEnMarcha(); }
       refrescarVivosLight();
     });
     pintarLight();
@@ -7577,7 +7584,7 @@ function prebufferPrevia() {
     const e = escenas[PREVIA.i + d];
     if (!e || !e.imagen) continue;
     const img = new Image();
-    img.src = `${API.archivo(pid, e.imagen)}?mini=1024`;
+    img.src = urlImagenPrevia(pid, e);
   }
 }
 
@@ -7843,9 +7850,18 @@ function vistaPreviaLight() {
     marco.appendChild(h('img', {
       // en miniatura ancha: se ve igual en pantalla y entra en la caché que
       // ya ha llenado el prebuffer, así que la flecha derecha es instantánea
-      src: `${API.archivo(v.pid, fondo)}?mini=1024`,
+      src: urlImagenPrevia(v.pid, e),
       alt: e.id,
     }));
+  }
+  /* LA QUE ACABA DE SALIR DE UNA TANDA EN MARCHA. Se enseña en cuanto existe,
+     pero todavía no es la del vídeo: se publica cuando termina la tanda. */
+  if (e.nueva) {
+    marco.appendChild(h('span', { clase: 'previa-nueva' },
+      '✓ nueva · se publica al terminar la tanda'));
+  } else if (fondo && corriendoImagenesLight()) {
+    marco.appendChild(h('span', { clase: 'previa-nueva pendiente' },
+      '… todavía la anterior: esta aún no se ha rehecho'));
   }
   /* NI SUBTITULO NI SELLO DE CARTELA: aqui se mira el DIBUJO y nada mas.
      Los dos se revisan -- y se corrigen -- en la pantalla del video, que es
@@ -8767,6 +8783,8 @@ async function refrescarLoDibujado() {
         (PREVIA.ficha.escenas || []).forEach(e => {
           const suya = suyas[e.id];
           e.imagen = suya.imagen;
+          e.nueva = suya.nueva;
+          e.sello = suya.sello;
           if (suya.obsoleta) { e.obsoleta = true; e.dibujada_para = suya.dibujada_para; }
           else { delete e.obsoleta; delete e.dibujada_para; }
         });
@@ -11678,10 +11696,37 @@ async function rehacerTodasLasImagenes() {
         v.vista = 'previa';
       }
       pintarLight();
-    }, () => { refrescarPlanosLight(); refrescarVivosLight(); });
+    }, () => { refrescarPlanosLight(); refrescarImagenesEnMarcha(); refrescarVivosLight(); });
     pintarLight();
   } catch (err) {
     mostrarError(CLAVE_VIDEO_LIGHT, err);
     pintarLight();
   }
+}
+
+/* ============================================ LAS IMÁGENES MIENTRAS SE HACEN
+ *
+ * La pantalla de Imágenes enseña cada imagen nueva EN CUANTO EXISTE (el
+ * servidor la marca `nueva`), sin esperar a que termine la tanda. Mientras
+ * corre se vuelve a pedir cada pocos segundos: no en cada imagen, que con
+ * cuatro cadenas a la vez serían peticiones sin respiro.
+ */
+const ENMARCHA = { ultima: 0 };
+const CADA_MS_ENMARCHA = 6000;
+
+function urlImagenPrevia(pid, e) {
+  return `${API.archivo(pid, e.imagen)}?mini=1024` + (e.sello ? `&v=${e.sello}` : '');
+}
+
+function corriendoImagenesLight() {
+  const t = trabajoVideoLight();
+  return !!t && (t.paso === 'assets' || String(t.nombre || '').includes('video'));
+}
+
+function refrescarImagenesEnMarcha() {
+  if (videoAbierto().vista !== 'previa' || !PREVIA.ficha) return;
+  const ahora = Date.now();
+  if (ahora - ENMARCHA.ultima < CADA_MS_ENMARCHA) return;
+  ENMARCHA.ultima = ahora;
+  refrescarLoDibujado().then(() => repintarVideo()).catch(() => {});
 }
